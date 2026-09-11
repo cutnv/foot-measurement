@@ -1,0 +1,96 @@
+# Foot Measurement
+
+基于 Flask、OpenCV 和轻量模型的三视角足部尺寸测量网页。用户将裸足踩在 A4 纸上，上传正上方、左侧斜拍、右侧斜拍三张照片，系统输出脚长、脚掌宽、脚跟宽、置信度和轮廓结果图。
+
+> 当前为开发版本。测量精度依赖照片清晰度、光线、A4 纸边可见程度和拍摄角度，暂不能替代专业量脚设备。
+
+## 快速启动（Docker）
+
+需要安装 Docker Desktop，并确保 Docker 已启动。
+
+```bash
+git clone https://github.com/cutnv/foot-measurement.git
+cd foot-measurement
+docker compose -f web/docker-compose.yml up -d --build
+```
+
+浏览器打开：<http://localhost:5000>
+
+停止服务：
+
+```bash
+docker compose -f web/docker-compose.yml down
+```
+
+## 本地 Python 启动
+
+需要 Python 3.11 或更高版本。
+
+Windows：
+
+```powershell
+python -m venv .venv
+.venv\Scripts\python -m pip install -r web\requirements.txt
+.venv\Scripts\python web\app.py
+```
+
+Linux / macOS：
+
+```bash
+python3 -m venv .venv
+.venv/bin/python -m pip install -r web/requirements.txt
+.venv/bin/python web/app.py
+```
+
+然后打开：<http://localhost:5000>
+
+## 拍摄要求
+
+1. 裸足自然承重，脚跟最后端凸起点贴齐 A4 纸底部短边。
+2. 第一张从正上方拍摄，镜头尽量与纸面平行。
+3. 第二、三张分别从脚的左右两侧约 25°—40° 拍摄，推荐 30°—35°。
+4. 三张照片使用同一手机、同一 1× 倍率；拍摄期间脚和 A4 纸保持不动。
+5. 保证脚尖、脚侧和至少三条纸边清晰可见，避免模糊、强阴影、彩色灯光和 0.5× 超广角。
+
+## 项目结构
+
+```text
+models/                         当前网页使用的三个模型
+web/app.py                      Flask 接口和测量算法
+web/templates/index.html        网页界面
+web/static/guide/               拍摄示例图
+web/test_*.py                   测试脚本
+web/evaluate_*.py               评估脚本
+web/requirements.txt            Python 依赖
+web/Dockerfile                  应用镜像
+web/docker-compose.yml          本地 Docker 启动配置
+web/nginx-foot.conf             Nginx 反向代理示例
+```
+
+## 测试
+
+基础语法和纸张恢复测试：
+
+```bash
+python -m py_compile web/app.py
+python web/test_paper_recovery.py
+```
+
+部分批量回归测试依赖未上传的本地照片数据集，因此无法在全新克隆的仓库中直接运行。
+
+## 数据与部署说明
+
+- 仓库不包含真实用户照片、训练数据集、虚拟环境、缓存和调试产物。
+- 当前版本没有业务数据库；生成的结果图暂存在 `web/uploads/`，该目录不会提交到 Git。
+- 正式对外部署前应配置 HTTPS、访问控制、结果文件清理、数据库、备份和隐私策略。
+- Nginx 配置文件仅为反向代理示例，需根据实际域名和证书修改。
+
+## 当前使用的模型
+
+- `paper_candidate_ranker.npz`
+- `paper_lraspp_amodal_v1.onnx`
+- `universal_measurement_v2.npz`
+
+## 许可
+
+本项目目前未声明开源许可证。未经仓库所有者许可，不得复制、分发或商用。
