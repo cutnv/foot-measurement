@@ -15,7 +15,7 @@ button:focus-visible,.upload-zone:focus-visible,summary:focus-visible{outline:3p
 .eyebrow{font:700 .7rem/1.2 "DIN Alternate","Arial Narrow",sans-serif;letter-spacing:.15em;color:var(--cyan);text-transform:uppercase}
 h1{font-size:clamp(1.65rem,7vw,2.15rem);font-weight:750;letter-spacing:-.04em;margin-top:7px}
 .subtitle{font-size:.86rem;color:var(--muted);margin-top:7px;line-height:1.6}
-.steps,.slot,.result-card{background:var(--paper);border:1px solid rgba(19,34,56,.06);border-radius:16px;box-shadow:0 8px 28px rgba(30,56,78,.07)}
+.steps,.slot,.result-card,.foot-side-card{background:var(--paper);border:1px solid rgba(19,34,56,.06);border-radius:16px;box-shadow:0 8px 28px rgba(30,56,78,.07)}
 .steps{padding:18px;margin:14px 0}
 .guide-head{display:flex;justify-content:space-between;align-items:center;gap:12px;margin-bottom:12px}
 .guide-head h2{font-size:1rem}
@@ -51,6 +51,7 @@ h1{font-size:clamp(1.65rem,7vw,2.15rem);font-weight:750;letter-spacing:-.04em;ma
 .steps details{margin-top:12px;border-top:1px solid var(--line);padding-top:10px}
 .steps summary{cursor:pointer;font-size:.78rem;font-weight:700;color:var(--blue)}
 .steps details p{font-size:.75rem;color:var(--muted);line-height:1.6;margin-top:8px}
+.foot-side-card{padding:15px;margin:14px 0}.foot-side-title{font-size:.86rem;font-weight:700;margin-bottom:10px}.foot-side-options{display:grid;grid-template-columns:1fr 1fr;gap:9px}.foot-side-option{display:flex;align-items:center;justify-content:center;gap:7px;padding:12px;border:1px solid var(--line);border-radius:10px;font-size:.84rem;font-weight:700;cursor:pointer}.foot-side-option:has(input:checked){border-color:var(--blue);background:#eef4ff;color:var(--blue)}.foot-side-option input{accent-color:var(--blue)}
 .slots{display:flex;flex-direction:column;gap:14px;margin:14px 0}
 .slot{padding:15px}
 .slot-header{display:flex;justify-content:space-between;align-items:center;margin-bottom:10px}
@@ -75,6 +76,7 @@ button:disabled{opacity:.42;cursor:not-allowed}input[type=file]{display:none}
 .warning-msg{display:none;margin-bottom:12px;padding:10px 12px;border-radius:9px;background:#fff7e6;color:#8b5b00;font-size:.77rem;line-height:1.55}
 .result-imgs{display:flex;gap:8px;overflow-x:auto;margin-bottom:14px;padding-bottom:4px}.result-imgs img{height:180px;border-radius:8px;flex-shrink:0;object-fit:contain;background:#f8fafc}
 .measurements{display:flex;flex-direction:column;gap:9px}.meas-row{display:flex;justify-content:space-between;align-items:center;padding:11px 14px;background:#f4f8fa;border-radius:9px}.meas-label{font-size:.84rem;color:#58687a}.meas-output{text-align:right}.meas-value{font:700 1.12rem/1 "DIN Alternate","Arial Narrow",sans-serif;color:var(--blue);font-variant-numeric:tabular-nums}.meas-sub{font-size:.72rem;color:#8a97a5;margin-top:3px}.confidence-badge{display:inline-block;margin-top:6px;padding:3px 7px;border-radius:999px;font-size:.66rem;font-weight:700}.confidence-badge.high{background:#ddf5e9;color:#187853}.confidence-badge.medium{background:#ffefc7;color:#8b5b00}.confidence-badge.low{background:#ffe1df;color:var(--danger)}
+.save-panel{margin-top:14px;padding:13px;background:#f4f8fa;border-radius:10px}.save-notice{font-size:.74rem;line-height:1.55;color:#5d6d7e}.btn-save{width:100%;margin-top:10px;padding:12px;border:0;border-radius:9px;background:var(--blue);color:#fff;font-weight:700;cursor:pointer}.save-status{min-height:1.2em;margin-top:8px;font-size:.75rem;color:var(--muted)}.save-status.error{color:var(--danger)}.measurement-code{display:none;grid-template-columns:1fr auto;gap:7px;margin-top:9px}.measurement-code.show{display:grid}.measurement-code input{min-width:0;padding:10px;border:1px solid var(--line);border-radius:8px;background:#fff;color:var(--ink);font-weight:700}.btn-copy{padding:9px 12px;border:0;border-radius:8px;background:var(--ink);color:#fff;cursor:pointer}
 .footer{margin-top:20px;padding:16px 0;font-size:.72rem;color:#8b98a7;text-align:center}
 @media(min-width:520px){.example-strip{grid-auto-flow:row;grid-template-columns:repeat(3,1fr);overflow:visible}.example-tip{display:none}}
 @media(max-width:380px){.must-grid{grid-template-columns:1fr}.camera-left{left:5px}.camera-right{right:5px}.camera-mark{font-size:.62rem;padding:5px}.shoot-map{height:228px}}
@@ -133,6 +135,14 @@ button:disabled{opacity:.42;cursor:not-allowed}input[type=file]{display:none}
   </details>
 </section>
 
+<section class="foot-side-card" aria-labelledby="footSideTitle">
+  <div class="foot-side-title" id="footSideTitle">请选择正在测量哪只脚</div>
+  <div class="foot-side-options">
+    <label class="foot-side-option"><input type="radio" name="footSide" value="left">左脚</label>
+    <label class="foot-side-option"><input type="radio" name="footSide" value="right">右脚</label>
+  </div>
+</section>
+
 <div class="slots" id="slotsContainer"></div>
 
 <button class="btn-submit" id="btnSubmit" disabled>开始测量</button>
@@ -159,6 +169,15 @@ button:disabled{opacity:.42;cursor:not-allowed}input[type=file]{display:none}
       <div class="meas-output"><div class="meas-value" id="heelMm"></div><span class="confidence-badge" id="heelConfidence"></span></div>
     </div>
   </div>
+  <div class="save-panel">
+    <p class="save-notice">点击保存后，系统将保存足别、三个尺寸、置信度、提示信息、当前轮廓图和测量时间，用于后续定制鞋；不会保存上传的三张原照片。数据保留两年。</p>
+    <button class="btn-save" id="btnSave" type="button" disabled>保存此结果</button>
+    <div class="save-status" id="saveStatus"></div>
+    <div class="measurement-code" id="measurementCode">
+      <input id="measurementCodeValue" readonly aria-label="匿名测量编号">
+      <button class="btn-copy" id="btnCopyCode" type="button">复制编号</button>
+    </div>
+  </div>
 </div>
 
 <div class="footer">测量结果用于尺码参考；拍摄质量不足时系统会提示重拍。</div>
@@ -176,15 +195,33 @@ const btnSubmit = document.getElementById('btnSubmit');
 const loading = document.getElementById('loading');
 const errorMsg = document.getElementById('errorMsg');
 const resultCard = document.getElementById('resultCard');
+const footSideInputs = document.querySelectorAll('input[name="footSide"]');
+const btnSave = document.getElementById('btnSave');
+const saveStatus = document.getElementById('saveStatus');
+const measurementCode = document.getElementById('measurementCode');
+const measurementCodeValue = document.getElementById('measurementCodeValue');
+const btnCopyCode = document.getElementById('btnCopyCode');
 
 let slotData = {}; // key -> { file, previewUrl }
+let currentSaveToken = null;
 
 function showError(msg) { errorMsg.textContent = msg; errorMsg.classList.add('show'); }
 function hideError() { errorMsg.classList.remove('show'); }
 
 function updateSubmitBtn() {
-  btnSubmit.disabled = !SLOTS.filter(s => s.required)
+  const footSide = document.querySelector('input[name="footSide"]:checked');
+  btnSubmit.disabled = !footSide || !SLOTS.filter(s => s.required)
     .every(s => slotData[s.key]?.file);
+}
+
+function resetSavePanel() {
+  currentSaveToken = null;
+  btnSave.disabled = true;
+  btnSave.textContent = '保存此结果';
+  saveStatus.textContent = '';
+  saveStatus.className = 'save-status';
+  measurementCode.classList.remove('show');
+  measurementCodeValue.value = '';
 }
 
 function buildSlots() {
@@ -291,9 +328,12 @@ btnSubmit.onclick = async function() {
   loading.classList.add('show');
   btnSubmit.disabled = true;
   resultCard.classList.remove('show');
+  resetSavePanel();
 
   const fd = new FormData();
   keys.forEach(k => fd.append(k, slotData[k].file));
+  fd.append('foot_side', document.querySelector(
+    'input[name="footSide"]:checked').value);
 
   try {
     const resp = await fetch('/api/measure', { method: 'POST', body: fd });
@@ -358,6 +398,9 @@ btnSubmit.onclick = async function() {
       imgsDiv.appendChild(img);
     });
 
+    currentSaveToken = data.save_token || null;
+    btnSave.disabled = !currentSaveToken;
+
     resultCard.classList.add('show');
     resultCard.scrollIntoView({ behavior: 'smooth', block: 'start' });
   } catch (e) {
@@ -365,6 +408,51 @@ btnSubmit.onclick = async function() {
   } finally {
     loading.classList.remove('show');
     btnSubmit.disabled = false;
+  }
+};
+
+footSideInputs.forEach(input => input.addEventListener('change', () => {
+  resetSavePanel();
+  resultCard.classList.remove('show');
+  updateSubmitBtn();
+}));
+
+btnSave.onclick = async function() {
+  if (!currentSaveToken) return;
+  btnSave.disabled = true;
+  saveStatus.textContent = '正在保存...';
+  saveStatus.className = 'save-status';
+  try {
+    const resp = await fetch('/api/measurements', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ save_token: currentSaveToken })
+    });
+    const data = await resp.json();
+    if (!resp.ok) throw new Error(data.error || '保存失败');
+    measurementCodeValue.value = data.measurement_code;
+    measurementCode.classList.add('show');
+    saveStatus.textContent = '已保存，请保留匿名编号。';
+    btnSave.textContent = '已保存';
+  } catch (e) {
+    saveStatus.textContent = e.message;
+    saveStatus.className = 'save-status error';
+    btnSave.disabled = false;
+  }
+};
+
+btnCopyCode.onclick = async function() {
+  measurementCodeValue.select();
+  try {
+    if (navigator.clipboard && window.isSecureContext) {
+      await navigator.clipboard.writeText(measurementCodeValue.value);
+    } else {
+      document.execCommand('copy');
+    }
+    btnCopyCode.textContent = '已复制';
+    setTimeout(() => { btnCopyCode.textContent = '复制编号'; }, 1200);
+  } catch (_) {
+    saveStatus.textContent = '复制失败，请长按编号手动复制。';
   }
 };
 

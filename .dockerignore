@@ -1,6 +1,8 @@
 **
 !web/
 !web/**
+!db/
+!db/**
 !models/
 !models/paper_candidate_ranker.npz
 !models/paper_lraspp_amodal_v1.onnx
@@ -9,3 +11,4 @@
 web/uploads/
 web/__pycache__/
 web/*.zip
+web/.env*

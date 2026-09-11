@@ -1,17 +1,24 @@
 import os
 import uuid
 import itertools
+import json
 import math
+import re
+import secrets
 import struct
 import threading
+import time
 from concurrent.futures import ThreadPoolExecutor
 import cv2
 import numpy as np
 from flask import Flask, request, jsonify, send_from_directory, render_template
+from itsdangerous import BadSignature, SignatureExpired, URLSafeTimedSerializer
 
 app = Flask(__name__)
 app.config['MAX_CONTENT_LENGTH'] = 16 * 1024 * 1024
 app.config['UPLOAD_FOLDER'] = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'uploads')
+app.config['SAVE_TOKEN_SECRET'] = (
+    os.environ.get('SAVE_TOKEN_SECRET') or secrets.token_urlsafe(32))
 
 os.makedirs(app.config['UPLOAD_FOLDER'], exist_ok=True)
 
@@ -27,11 +34,152 @@ MIN_MULTIVIEW_SIDE_ANGLE_DEG = 8.0
 HARD_MIN_SEGMENTATION_AGREEMENT = 0.65
 WARN_SEGMENTATION_AGREEMENT = 0.80
 HARD_MAX_HEEL_STABILITY_MM = 8.0
+SAVE_TOKEN_TTL_SECONDS = 30 * 60
 
 ALLOWED_EXT = {'.jpg', '.jpeg', '.png', '.bmp', '.webp'}
+_RESULT_FILE_RE = re.compile(r'^result_(?:multi_)?[0-9a-f]{32}\.png$')
 _PAPER_RANKER = None
 _MEASUREMENT_FUSION = None
 _PAPER_SEGMENTER_LOCAL = threading.local()
+
+
+def _save_serializer():
+    return URLSafeTimedSerializer(
+        app.config['SAVE_TOKEN_SECRET'], salt='measurement-save-v1')
+
+
+def _issue_save_token(result, foot_side):
+    filename = os.path.basename(result['result_image'])
+    if not _RESULT_FILE_RE.fullmatch(filename):
+        raise ValueError('结果图文件名异常')
+    return _save_serializer().dumps({
+        'version': 1,
+        'save_nonce': str(uuid.uuid4()),
+        'foot_side': foot_side,
+        'foot_length_mm': result['foot_length'],
+        'ball_width_mm': result['ball_width'],
+        'heel_width_mm': result['heel_width'],
+        'quality_grade': result.get('quality_grade', 'unrated'),
+        'dimension_confidence': result.get('dimension_confidence', {}),
+        'warnings': result.get('warnings', []),
+        'result_filename': filename,
+    })
+
+
+def _read_save_token(token):
+    data = _save_serializer().loads(token, max_age=SAVE_TOKEN_TTL_SECONDS)
+    if not isinstance(data, dict) or data.get('version') != 1:
+        raise BadSignature('unsupported token')
+    try:
+        uuid.UUID(data['save_nonce'])
+    except (KeyError, TypeError, ValueError) as exc:
+        raise BadSignature('invalid nonce') from exc
+    if data.get('foot_side') not in {'left', 'right'}:
+        raise BadSignature('invalid foot side')
+    filename = data.get('result_filename')
+    if not isinstance(filename, str) or not _RESULT_FILE_RE.fullmatch(filename):
+        raise BadSignature('invalid result filename')
+    limits = {
+        'foot_length_mm': (180, 350, False),
+        'ball_width_mm': (60, 130, False),
+        'heel_width_mm': (30, 100, True),
+    }
+    for key, (minimum, maximum, nullable) in limits.items():
+        value = data.get(key)
+        if value is None and nullable:
+            continue
+        if (isinstance(value, bool) or not isinstance(value, (int, float)) or
+                not minimum <= value <= maximum):
+            raise BadSignature(f'invalid {key}')
+    if data.get('quality_grade') not in {'high', 'medium', 'low', 'unrated'}:
+        raise BadSignature('invalid quality grade')
+    confidence = data.get('dimension_confidence')
+    if not isinstance(confidence, dict):
+        raise BadSignature('invalid confidence')
+    warnings = data.get('warnings')
+    if (not isinstance(warnings, list) or len(warnings) > 20 or
+            any(not isinstance(item, str) or len(item) > 500
+                for item in warnings)):
+        raise BadSignature('invalid warnings')
+    return data
+
+
+def _result_path(filename):
+    upload_dir = os.path.abspath(app.config['UPLOAD_FOLDER'])
+    path = os.path.abspath(os.path.join(upload_dir, filename))
+    if os.path.dirname(path) != upload_dir:
+        raise ValueError('结果图路径异常')
+    return path
+
+
+def _cleanup_expired_results():
+    cutoff = time.time() - SAVE_TOKEN_TTL_SECONDS
+    try:
+        entries = os.scandir(app.config['UPLOAD_FOLDER'])
+    except OSError:
+        return
+    with entries:
+        for entry in entries:
+            if (not entry.is_file(follow_symlinks=False) or
+                    not _RESULT_FILE_RE.fullmatch(entry.name)):
+                continue
+            try:
+                if entry.stat(follow_symlinks=False).st_mtime < cutoff:
+                    os.remove(entry.path)
+            except OSError:
+                app.logger.warning('无法清理过期结果图：%s', entry.name)
+
+
+def _result_cleanup_loop():
+    while True:
+        time.sleep(60)
+        _cleanup_expired_results()
+
+
+threading.Thread(
+    target=_result_cleanup_loop, name='result-cleanup', daemon=True).start()
+
+
+def _database_connection():
+    database_url = os.environ.get('DATABASE_URL')
+    if not database_url:
+        raise RuntimeError('DATABASE_URL 未配置')
+    try:
+        import psycopg
+    except ImportError as exc:
+        raise RuntimeError('PostgreSQL 驱动未安装') from exc
+    return psycopg.connect(
+        database_url, connect_timeout=3,
+        options='-c statement_timeout=5000')
+
+
+def _lookup_measurement_code(save_nonce):
+    with _database_connection() as connection:
+        with connection.cursor() as cursor:
+            cursor.execute(
+                'SELECT public.lookup_measurement_code(%s::uuid)',
+                (save_nonce,))
+            row = cursor.fetchone()
+    return row[0] if row else None
+
+
+def _save_measurement_record(data, image_png):
+    with _database_connection() as connection:
+        with connection.cursor() as cursor:
+            cursor.execute(
+                '''SELECT public.save_shoe_measurement(
+                    %s::uuid, %s::text, %s::numeric, %s::numeric,
+                    %s::numeric, %s::text, %s::jsonb, %s::jsonb, %s::bytea
+                )''',
+                (data['save_nonce'], data['foot_side'],
+                 data['foot_length_mm'], data['ball_width_mm'],
+                 data['heel_width_mm'], data['quality_grade'],
+                 json.dumps(data['dimension_confidence'], ensure_ascii=False),
+                 json.dumps(data['warnings'], ensure_ascii=False), image_png))
+            row = cursor.fetchone()
+    if not row or not row[0]:
+        raise RuntimeError('数据库未返回测量编号')
+    return row[0]
 
 
 def _order_box(box):
@@ -5062,6 +5210,10 @@ def serve_upload(filename):
 
 @app.route('/api/measure', methods=['POST'])
 def measure():
+    _cleanup_expired_results()
+    foot_side = request.form.get('foot_side', '').strip().lower()
+    if foot_side not in {'left', 'right'}:
+        return jsonify({'error': '请选择正在测量左脚还是右脚'}), 400
     if 'image_measure' not in request.files:
         return jsonify({'error': '请上传正上方测量照片'}), 400
 
@@ -5083,6 +5235,7 @@ def measure():
         if error:
             return jsonify({'error': '联合测量失败',
                             'details': [error]}), 400
+        save_token = _issue_save_token(result, foot_side)
         return jsonify({
             'average': {
                 'foot_length': result['foot_length'],
@@ -5096,6 +5249,8 @@ def measure():
             'dimension_confidence': result['dimension_confidence'],
             'retake_recommended': result['retake_recommended'],
             'warnings': result['warnings'],
+            'save_token': save_token,
+            'save_token_expires_in': SAVE_TOKEN_TTL_SECONDS,
             'errors': []
         })
 
@@ -5109,6 +5264,7 @@ def measure():
         verification_received = bool(
             verify.filename and allowed_file(verify.filename))
 
+    save_token = _issue_save_token(result, foot_side)
     return jsonify({
         'average': {
             'foot_length': result['foot_length'],
@@ -5119,8 +5275,57 @@ def measure():
         'count': 1,
         'verification_received': verification_received,
         'warnings': result['warnings'],
+        'save_token': save_token,
+        'save_token_expires_in': SAVE_TOKEN_TTL_SECONDS,
         'errors': []
     })
+
+
+@app.route('/api/measurements', methods=['POST'])
+def save_measurement():
+    _cleanup_expired_results()
+    payload = request.get_json(silent=True)
+    token = payload.get('save_token') if isinstance(payload, dict) else None
+    if not isinstance(token, str) or not token:
+        return jsonify({'error': '缺少保存凭证'}), 400
+    try:
+        data = _read_save_token(token)
+    except SignatureExpired:
+        return jsonify({'error': '保存凭证已过期，请重新测量'}), 410
+    except BadSignature:
+        return jsonify({'error': '保存凭证无效，请重新测量'}), 400
+
+    result_path = _result_path(data['result_filename'])
+    if not os.path.isfile(result_path):
+        try:
+            measurement_code = _lookup_measurement_code(data['save_nonce'])
+        except Exception:
+            app.logger.exception('查询已保存测量结果失败')
+            return jsonify({
+                'error': '数据库暂时不可用，结果尚未保存，请稍后重试'
+            }), 503
+        if measurement_code:
+            return jsonify({'measurement_code': measurement_code,
+                            'saved': True, 'already_saved': True})
+        return jsonify({'error': '临时结果图已过期，请重新测量'}), 410
+
+    try:
+        with open(result_path, 'rb') as image_file:
+            image_png = image_file.read()
+        measurement_code = _save_measurement_record(data, image_png)
+    except Exception:
+        app.logger.exception('保存测量结果失败')
+        return jsonify({
+            'error': '数据库暂时不可用，结果尚未保存，请稍后重试'
+        }), 503
+
+    try:
+        os.remove(result_path)
+    except OSError:
+        app.logger.warning('已保存，但无法删除临时结果图：%s',
+                           data['result_filename'])
+    return jsonify({'measurement_code': measurement_code,
+                    'saved': True, 'already_saved': False})
 
 
 if __name__ == '__main__':

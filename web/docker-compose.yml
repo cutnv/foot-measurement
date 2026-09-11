@@ -1,9 +1,53 @@
 services:
+  db:
+    build:
+      context: ..
+      dockerfile: db/Dockerfile
+    container_name: foot-measure-db
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-foot_measurement}
+      POSTGRES_USER: ${POSTGRES_USER:-foot_admin}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-foot_admin_dev}
+      APP_DB_PASSWORD: ${APP_DB_PASSWORD:-foot_app_dev}
+      READER_DB_PASSWORD: ${READER_DB_PASSWORD:-foot_reader_dev}
+    command:
+      - postgres
+      - -c
+      - shared_preload_libraries=pg_cron
+      - -c
+      - cron.database_name=${POSTGRES_DB:-foot_measurement}
+      - -c
+      - cron.use_background_workers=on
+      - -c
+      - max_worker_processes=20
+      - -c
+      - log_connections=on
+      - -c
+      - log_disconnections=on
+      - -c
+      - log_statement=${POSTGRES_LOG_STATEMENT:-none}
+    ports:
+      - "127.0.0.1:${POSTGRES_PORT:-5432}:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-foot_admin} -d ${POSTGRES_DB:-foot_measurement}"]
+      interval: 5s
+      timeout: 3s
+      retries: 15
+    restart: unless-stopped
+
   foot-measure:
     build:
       context: ..
       dockerfile: web/Dockerfile
     container_name: foot-measure
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: ${DATABASE_URL:-postgresql://foot_app:${APP_DB_PASSWORD:-foot_app_dev}@db:5432/${POSTGRES_DB:-foot_measurement}}
+      SAVE_TOKEN_SECRET: ${SAVE_TOKEN_SECRET:-development-only-change-before-production}
     ports:
       - "5000:5000"
     volumes:
@@ -13,3 +57,6 @@ services:
       resources:
         limits:
           memory: 1G
+
+volumes:
+  postgres-data:

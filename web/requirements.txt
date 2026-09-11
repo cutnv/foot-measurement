@@ -2,3 +2,4 @@ flask
 gunicorn
 opencv-python-headless
 numpy
+psycopg[binary]

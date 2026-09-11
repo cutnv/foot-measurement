@@ -22,6 +22,10 @@ docker compose -f web/docker-compose.yml up -d --build
 
 浏览器打开：<http://localhost:5000>
 
+默认会同时启动网页和本地 PostgreSQL。正式使用前请复制
+`web/.env.example` 为自己的环境变量文件，替换其中所有密码和
+`SAVE_TOKEN_SECRET`，再通过 `--env-file web/.env` 启动。
+
 停止服务：
 
 ```bash
@@ -71,6 +75,8 @@ web/requirements.txt            Python 依赖
 web/Dockerfile                  应用镜像
 web/docker-compose.yml          本地 Docker 启动配置
 web/nginx-foot.conf             Nginx 反向代理示例
+db/migrations/                  PostgreSQL 版本化结构迁移
+db/init/                        数据库最小权限账号初始化
 ```
 
 ## 测试
@@ -87,7 +93,11 @@ python web/test_paper_recovery.py
 ## 数据与部署说明
 
 - 仓库不包含真实用户照片、训练数据集、虚拟环境、缓存和调试产物。
-- 当前版本没有业务数据库；生成的结果图暂存在 `web/uploads/`，该目录不会提交到 Git。
+- 用户点击“保存此结果”后，系统保存匿名编号、足别、尺寸、置信度、提示、轮廓图和时间，不保存三张原照片。
+- 保存凭证由服务器签名且 30 分钟过期；保存成功或过期后会清理临时结果图。
+- PostgreSQL 数据保留两年，`pg_cron` 每日清理过期记录。
+- 本地数据库仅绑定 `127.0.0.1`；网页账号只能调用保存函数，维护账号只读。
+- 开发阶段尚未配置备份。正式应用前必须增加备份、恢复演练和监控。
 - 正式对外部署前应配置 HTTPS、访问控制、结果文件清理、数据库、备份和隐私策略。
 - Nginx 配置文件仅为反向代理示例，需根据实际域名和证书修改。
 
