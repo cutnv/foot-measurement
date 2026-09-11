@@ -1,0 +1,15 @@
+services:
+  foot-measure:
+    build:
+      context: ..
+      dockerfile: web/Dockerfile
+    container_name: foot-measure
+    ports:
+      - "5000:5000"
+    volumes:
+      - ./uploads:/app/uploads
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          memory: 1G

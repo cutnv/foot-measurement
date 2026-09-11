@@ -1,0 +1,374 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>脚部尺寸测量</title>
+<style>
+:root{--ink:#132238;--muted:#65758b;--blue:#155eef;--cyan:#0e7490;--heel:#df5738;--paper:#fff;--mist:#edf3f7;--line:#d6e0e8;--ok:#16845b;--danger:#c93636}
+*{margin:0;padding:0;box-sizing:border-box}
+body{font-family:"Microsoft YaHei UI","PingFang SC",system-ui,-apple-system,sans-serif;background:var(--mist);color:var(--ink);min-height:100vh;padding:18px 14px 32px}
+button,input{font:inherit}
+button:focus-visible,.upload-zone:focus-visible,summary:focus-visible{outline:3px solid rgba(21,94,239,.25);outline-offset:2px}
+.app-shell{width:min(100%,560px);margin:0 auto}
+.header{padding:18px 4px 10px;text-align:left}
+.eyebrow{font:700 .7rem/1.2 "DIN Alternate","Arial Narrow",sans-serif;letter-spacing:.15em;color:var(--cyan);text-transform:uppercase}
+h1{font-size:clamp(1.65rem,7vw,2.15rem);font-weight:750;letter-spacing:-.04em;margin-top:7px}
+.subtitle{font-size:.86rem;color:var(--muted);margin-top:7px;line-height:1.6}
+.steps,.slot,.result-card{background:var(--paper);border:1px solid rgba(19,34,56,.06);border-radius:16px;box-shadow:0 8px 28px rgba(30,56,78,.07)}
+.steps{padding:18px;margin:14px 0}
+.guide-head{display:flex;justify-content:space-between;align-items:center;gap:12px;margin-bottom:12px}
+.guide-head h2{font-size:1rem}
+.guide-tag{white-space:nowrap;font:700 .7rem/1 "DIN Alternate",sans-serif;padding:6px 9px;border-radius:999px;background:#e9f0ff;color:var(--blue)}
+.shoot-map{height:238px;position:relative;overflow:hidden;border:1px solid #d8e6ee;border-radius:14px;background-color:#f7fbfd;background-image:linear-gradient(rgba(14,116,144,.07) 1px,transparent 1px),linear-gradient(90deg,rgba(14,116,144,.07) 1px,transparent 1px);background-size:18px 18px}
+.paper-map{position:absolute;width:118px;height:168px;left:50%;top:48px;transform:translateX(-50%);background:#fff;border:2px solid #9db6c5;box-shadow:0 8px 20px rgba(30,70,90,.1)}
+.paper-map::after{content:"脚跟基准边";position:absolute;left:-14px;right:-14px;bottom:-2px;border-bottom:4px solid var(--heel);padding-bottom:5px;text-align:center;font-size:.62rem;font-weight:700;color:#a93c28}
+.foot-map{position:absolute;width:48px;height:137px;left:50%;bottom:3px;transform:translateX(-50%);background:#bed4dc;border:2px solid #698e9e;border-radius:45% 55% 34% 38% / 20% 24% 13% 14%}
+.foot-map::after{content:"";position:absolute;width:32px;height:41px;left:6px;bottom:-2px;border-radius:50%;background:#bed4dc}
+.camera-mark{position:absolute;display:flex;align-items:center;gap:5px;font-size:.68rem;font-weight:700;color:var(--ink);padding:6px 8px;border-radius:8px;background:#fff;border:1px solid #bed0db;box-shadow:0 4px 12px rgba(30,70,90,.1)}
+.camera-mark::before{content:"";width:12px;height:8px;border:2px solid var(--blue);border-radius:3px}
+.camera-top{left:50%;top:8px;transform:translateX(-50%)}
+.camera-left{left:12px;top:112px}.camera-right{right:12px;top:112px}
+.camera-left::after,.camera-right::after{content:"";position:absolute;width:42px;border-top:1px dashed var(--cyan);top:50%}
+.camera-left::after{left:100%;transform:rotate(12deg);transform-origin:left}.camera-right::after{right:100%;transform:rotate(-12deg);transform-origin:right}
+.angle-note{font-size:.8rem;line-height:1.55;color:#40546b;background:#eef6f8;border-left:3px solid var(--cyan);padding:10px 11px;margin:12px 0}
+.examples{margin:16px 0 14px}
+.examples-head{display:flex;align-items:end;justify-content:space-between;gap:12px;margin-bottom:9px}
+.examples-head h3{font-size:.9rem}.examples-head span{font-size:.68rem;color:var(--muted)}
+.example-strip{display:grid;grid-auto-flow:column;grid-auto-columns:min(82%,340px);gap:10px;overflow-x:auto;scroll-snap-type:x mandatory;padding:1px 1px 6px;scrollbar-width:none}
+.example-strip::-webkit-scrollbar{display:none}
+.shot-example{scroll-snap-align:start;overflow:hidden;border:1px solid var(--line);border-radius:12px;background:#f7fafb}
+.shot-example img{display:block;width:100%;aspect-ratio:1;object-fit:cover;background:#e9eff2}
+.shot-example figcaption{display:grid;grid-template-columns:25px 1fr;gap:8px;align-items:start;padding:10px}
+.shot-no{display:grid;place-items:center;width:25px;height:25px;border-radius:7px;background:var(--blue);color:#fff;font:700 .7rem/1 "DIN Alternate",sans-serif}
+.shot-copy strong{display:block;font-size:.79rem;margin-bottom:2px}.shot-copy span{display:block;font-size:.69rem;line-height:1.45;color:#68788b}
+.example-tip{margin-top:5px;font-size:.68rem;color:var(--cyan);font-weight:650}
+.must-grid{display:grid;grid-template-columns:1fr 1fr;gap:8px;margin:10px 0 12px}
+.must-item{min-height:74px;padding:10px;border:1px solid var(--line);border-radius:11px;font-size:.74rem;line-height:1.45;color:#506176}
+.must-item strong{display:block;color:var(--ink);font-size:.78rem;margin-bottom:3px}
+.must-item b{color:var(--heel)}
+.steps ol{padding-left:20px;font-size:.8rem;color:#4d5d70;line-height:1.75}
+.steps details{margin-top:12px;border-top:1px solid var(--line);padding-top:10px}
+.steps summary{cursor:pointer;font-size:.78rem;font-weight:700;color:var(--blue)}
+.steps details p{font-size:.75rem;color:var(--muted);line-height:1.6;margin-top:8px}
+.slots{display:flex;flex-direction:column;gap:14px;margin:14px 0}
+.slot{padding:15px}
+.slot-header{display:flex;justify-content:space-between;align-items:center;margin-bottom:10px}
+.slot-title{display:flex;align-items:center;gap:8px}.slot-step{display:grid;place-items:center;width:24px;height:24px;border-radius:7px;background:var(--ink);color:#fff;font:700 .72rem/1 "DIN Alternate",sans-serif}
+.slot-label{font-size:.9rem;font-weight:700}.slot-angle{display:block;font-size:.68rem;color:var(--muted);font-weight:500;margin-top:2px}
+.slot-badge{font-size:.7rem;padding:4px 8px;border-radius:20px;background:#e7edf1;color:#617182}
+.slot-badge.done{background:#e0f5eb;color:var(--ok)}.slot-badge.fail{background:#fee8e7;color:var(--danger)}
+.upload-zone{width:100%;aspect-ratio:4/3;border:2px dashed #c8d5df;border-radius:12px;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:8px;cursor:pointer;transition:border-color .2s,background .2s;position:relative;overflow:hidden;background:#f8fbfc}
+.upload-zone:hover,.upload-zone.dragover{border-color:var(--blue);background:#f0f5ff}.upload-zone.has-image{border-style:solid;border-color:var(--blue)}
+.upload-zone img{width:100%;height:100%;object-fit:contain;position:absolute;inset:0;border-radius:10px}
+.upload-icon{font-size:1.65rem}.upload-hint{max-width:80%;font-size:.78rem;color:#748396;text-align:center;line-height:1.5}
+.baseline-guide{position:absolute;z-index:3;left:8%;right:8%;bottom:9%;border-bottom:3px solid var(--heel);color:#a93c28;font-size:.7rem;font-weight:700;text-align:center;padding-bottom:5px;pointer-events:none;text-shadow:0 1px 2px #fff;background:linear-gradient(90deg,transparent,rgba(255,255,255,.82),transparent)}
+.slot-note{font-size:.74rem;color:#6e7c8e;line-height:1.55;margin-top:9px}
+.slot-actions{display:flex;gap:8px;margin-top:9px}.slot-actions button{flex:1;padding:11px;border:none;border-radius:9px;font-size:.82rem;font-weight:650;cursor:pointer;transition:opacity .2s,transform .15s}.slot-actions button:active{transform:scale(.98)}
+.btn-cam{background:var(--blue);color:#fff}.btn-sel{background:#eaf0f4;color:var(--ink)}.btn-rm{background:#fee8e7;color:var(--danger);font-size:.76rem}
+button:disabled{opacity:.42;cursor:not-allowed}input[type=file]{display:none}
+.btn-submit{position:sticky;bottom:12px;z-index:5;width:100%;padding:15px;border:none;border-radius:12px;font-size:1rem;font-weight:750;background:var(--ink);color:#fff;cursor:pointer;margin-top:8px;box-shadow:0 8px 20px rgba(19,34,56,.2)}.btn-submit:disabled{box-shadow:none}
+.loading{text-align:center;margin:16px 0;color:var(--muted);font-size:.86rem;display:none}.loading.show{display:block}.spinner{display:inline-block;width:18px;height:18px;border:2px solid #d9e2e8;border-top-color:var(--blue);border-radius:50%;animation:spin .6s linear infinite;vertical-align:middle;margin-right:6px}@keyframes spin{to{transform:rotate(360deg)}}
+.error-msg{white-space:pre-line;color:var(--danger);font-size:.82rem;line-height:1.55;margin:12px 0;padding:11px;background:#fff1f0;border-radius:10px;display:none}.error-msg.show{display:block}
+.result-card{padding:16px;margin-top:16px;display:none}.result-card.show{display:block}.result-header{font-size:.92rem;font-weight:700;margin-bottom:12px;color:var(--blue)}
+.confidence-summary{display:none;margin:-4px 0 12px;padding:9px 12px;border-radius:9px;font-size:.78rem;font-weight:700}.confidence-summary.show{display:block}.confidence-summary.high{background:#e9f8f1;color:#187853}.confidence-summary.medium{background:#fff7e6;color:#8b5b00}.confidence-summary.low{background:#fff1f0;color:var(--danger)}
+.warning-msg{display:none;margin-bottom:12px;padding:10px 12px;border-radius:9px;background:#fff7e6;color:#8b5b00;font-size:.77rem;line-height:1.55}
+.result-imgs{display:flex;gap:8px;overflow-x:auto;margin-bottom:14px;padding-bottom:4px}.result-imgs img{height:180px;border-radius:8px;flex-shrink:0;object-fit:contain;background:#f8fafc}
+.measurements{display:flex;flex-direction:column;gap:9px}.meas-row{display:flex;justify-content:space-between;align-items:center;padding:11px 14px;background:#f4f8fa;border-radius:9px}.meas-label{font-size:.84rem;color:#58687a}.meas-output{text-align:right}.meas-value{font:700 1.12rem/1 "DIN Alternate","Arial Narrow",sans-serif;color:var(--blue);font-variant-numeric:tabular-nums}.meas-sub{font-size:.72rem;color:#8a97a5;margin-top:3px}.confidence-badge{display:inline-block;margin-top:6px;padding:3px 7px;border-radius:999px;font-size:.66rem;font-weight:700}.confidence-badge.high{background:#ddf5e9;color:#187853}.confidence-badge.medium{background:#ffefc7;color:#8b5b00}.confidence-badge.low{background:#ffe1df;color:var(--danger)}
+.footer{margin-top:20px;padding:16px 0;font-size:.72rem;color:#8b98a7;text-align:center}
+@media(min-width:520px){.example-strip{grid-auto-flow:row;grid-template-columns:repeat(3,1fr);overflow:visible}.example-tip{display:none}}
+@media(max-width:380px){.must-grid{grid-template-columns:1fr}.camera-left{left:5px}.camera-right{right:5px}.camera-mark{font-size:.62rem;padding:5px}.shoot-map{height:228px}}
+@media(prefers-reduced-motion:reduce){*{scroll-behavior:auto!important;animation:none!important;transition:none!important}}
+</style>
+</head>
+<body>
+<main class="app-shell">
+<div class="header">
+  <div class="eyebrow">A4 · THREE VIEW</div>
+  <h1>拍三张，量脚型</h1>
+  <p class="subtitle">以A4纸建立毫米基准，联合正上方与左右斜拍计算脚长、脚掌宽和脚跟宽。</p>
+</div>
+
+<section class="steps" aria-labelledby="guideTitle">
+  <div class="guide-head"><h2 id="guideTitle">先看拍摄位置</h2><span class="guide-tag">约1分钟</span></div>
+  <div class="shoot-map" role="img" aria-label="手机在脚正上方、左侧约30度和右侧约30度各拍一张">
+    <div class="paper-map"><div class="foot-map"></div></div>
+    <div class="camera-mark camera-top">正上方 0°</div>
+    <div class="camera-mark camera-left">左侧 30°</div>
+    <div class="camera-mark camera-right">右侧 30°</div>
+  </div>
+  <p class="angle-note"><strong>斜拍最佳25°—40°，推荐30°—35°。</strong>这是手机位置偏离正上方的角度：手机要移到脚侧面，再让镜头对准脚中心，不是在原地只转动手机。</p>
+  <div class="examples" aria-labelledby="examplesTitle">
+    <div class="examples-head"><h3 id="examplesTitle">照着实拍示例构图</h3><span>顺序：上 · 左 · 右</span></div>
+    <div class="example-strip" aria-label="三张实拍示例，手机端可左右滑动">
+      <figure class="shot-example">
+        <img src="{{ url_for('static', filename='guide/top.jpg') }}" alt="正上方拍摄示例：脚和A4纸完整入镜" loading="lazy" decoding="async">
+        <figcaption><b class="shot-no">1</b><span class="shot-copy"><strong>正上方</strong><span>镜头与纸面平行，脚和纸四周保留画面空间。</span></span></figcaption>
+      </figure>
+      <figure class="shot-example">
+        <img src="{{ url_for('static', filename='guide/left.jpg') }}" alt="左侧约30度斜拍示例" loading="lazy" decoding="async">
+        <figcaption><b class="shot-no">2</b><span class="shot-copy"><strong>左侧斜拍</strong><span>手机移到脚左侧约30°，镜头始终对准脚中心。</span></span></figcaption>
+      </figure>
+      <figure class="shot-example">
+        <img src="{{ url_for('static', filename='guide/right.jpg') }}" alt="右侧约30度斜拍示例" loading="lazy" decoding="async">
+        <figcaption><b class="shot-no">3</b><span class="shot-copy"><strong>右侧斜拍</strong><span>与上一张分居两侧，脚和A4纸全程保持不动。</span></span></figcaption>
+      </figure>
+    </div>
+    <p class="example-tip">左右滑动查看三张示例</p>
+  </div>
+  <div class="must-grid">
+    <div class="must-item"><strong>脚跟怎么齐</strong>脚跟<b>最后端凸起点</b>与A4底部短边齐平，不是脚底接触皮肤的前缘。</div>
+    <div class="must-item"><strong>脚和纸不动</strong>固定A4纸，裸足自然承重；三张照片之间不要重新摆脚。</div>
+    <div class="must-item"><strong>相机设置</strong>三张都用同一手机、同一1×倍率；关闭超广角、滤镜和美颜。</div>
+    <div class="must-item"><strong>画面要求</strong>脚尖、脚侧完整入镜；尽量露出三条纸边，四个纸角无需全部可见。</div>
+  </div>
+  <ol>
+    <li>先拍正上方：手机位于脚正上方，镜头与纸面尽量平行。</li>
+    <li>保持脚和纸不动，手机移到左侧约30°拍一张。</li>
+    <li>手机移到右侧约30°再拍一张，镜头始终对准脚中心。</li>
+  </ol>
+  <details>
+    <summary>哪些情况应该直接重拍？</summary>
+    <p>照片明显模糊；强光形成大片深色阴影；脚尖或脚侧出画；两张斜拍来自同一侧；使用0.5×超广角；拍摄过程中脚或A4纸发生移动。</p>
+  </details>
+</section>
+
+<div class="slots" id="slotsContainer"></div>
+
+<button class="btn-submit" id="btnSubmit" disabled>开始测量</button>
+
+<div class="loading" id="loading"><span class="spinner"></span>分析中，请稍候...</div>
+<div class="error-msg" id="errorMsg"></div>
+
+<div class="result-card" id="resultCard">
+  <div class="result-header" id="resultHeader">测量结果</div>
+  <div class="confidence-summary" id="confidenceSummary"></div>
+  <div class="warning-msg" id="warningMsg"></div>
+  <div class="result-imgs" id="resultImgs"></div>
+  <div class="measurements">
+    <div class="meas-row">
+      <div><div class="meas-label">脚长</div><div class="meas-sub" id="lenCm"></div></div>
+      <div class="meas-output"><div class="meas-value" id="lenMm"></div><span class="confidence-badge" id="lenConfidence"></span></div>
+    </div>
+    <div class="meas-row">
+      <div><div class="meas-label">脚掌宽</div><div class="meas-sub" id="ballCm"></div></div>
+      <div class="meas-output"><div class="meas-value" id="ballMm"></div><span class="confidence-badge" id="ballConfidence"></span></div>
+    </div>
+    <div class="meas-row">
+      <div><div class="meas-label">脚跟宽</div><div class="meas-sub" id="heelCm"></div></div>
+      <div class="meas-output"><div class="meas-value" id="heelMm"></div><span class="confidence-badge" id="heelConfidence"></span></div>
+    </div>
+  </div>
+</div>
+
+<div class="footer">测量结果用于尺码参考；拍摄质量不足时系统会提示重拍。</div>
+</main>
+
+<script>
+const SLOTS = [
+  { key: 'image_measure', step: '1', label: '正上方', angle: '0° · 镜头与纸面平行', hint: '完整拍入脚尖、脚侧和大部分A4纸', baseline: true, required: true, note: '脚跟最后端凸起点贴齐A4底部短边；建立脚长和脚掌宽基础轮廓。' },
+  { key: 'image_left', step: '2', label: '左侧斜拍', angle: '25°—40° · 推荐30°—35°', hint: '手机移到脚左侧，再对准脚中心', required: true, note: '不要只在原地倾斜手机；纸边尽量入镜，腿遮住一个纸角可以。' },
+  { key: 'image_right', step: '3', label: '右侧斜拍', angle: '25°—40° · 推荐30°—35°', hint: '手机移到脚右侧，再对准脚中心', required: true, note: '必须与上一张分居脚的两侧；全程不要移动脚和A4纸。' }
+];
+
+const container = document.getElementById('slotsContainer');
+const btnSubmit = document.getElementById('btnSubmit');
+const loading = document.getElementById('loading');
+const errorMsg = document.getElementById('errorMsg');
+const resultCard = document.getElementById('resultCard');
+
+let slotData = {}; // key -> { file, previewUrl }
+
+function showError(msg) { errorMsg.textContent = msg; errorMsg.classList.add('show'); }
+function hideError() { errorMsg.classList.remove('show'); }
+
+function updateSubmitBtn() {
+  btnSubmit.disabled = !SLOTS.filter(s => s.required)
+    .every(s => slotData[s.key]?.file);
+}
+
+function buildSlots() {
+  container.innerHTML = '';
+  SLOTS.forEach(s => {
+    const div = document.createElement('div');
+    div.className = 'slot';
+    div.id = `slot-${s.key}`;
+    div.innerHTML = `
+      <div class="slot-header">
+        <div class="slot-title"><span class="slot-step">${s.step}</span><span class="slot-label">${s.label}<small class="slot-angle">${s.angle}</small></span></div>
+        <span class="slot-badge" id="badge-${s.key}">${s.required ? '必需' : '可选'}</span>
+      </div>
+      <div class="upload-zone" id="zone-${s.key}">
+        <div class="upload-placeholder" id="ph-${s.key}">
+          <div class="upload-icon">📷</div>
+          <div class="upload-hint">${s.hint}</div>
+        </div>
+        <img id="preview-${s.key}" style="display:none">
+        ${s.baseline ? '<div class="baseline-guide">脚跟贴齐此边</div>' : ''}
+      </div>
+      <div class="slot-actions">
+        <button class="btn-cam" type="button" id="cam-${s.key}">拍照</button>
+        <button class="btn-sel" type="button" id="sel-${s.key}">选择文件</button>
+        <button class="btn-rm" type="button" id="rm-${s.key}" style="display:none">移除</button>
+      </div>
+      <input type="file" id="camera-${s.key}" accept="image/jpeg,image/png,image/webp" capture="environment">
+      <input type="file" id="file-${s.key}" accept="image/jpeg,image/png,image/webp">
+      <div class="slot-note">${s.note}</div>
+    `;
+    container.appendChild(div);
+
+    const zone = document.getElementById(`zone-${s.key}`);
+    const camBtn = document.getElementById(`cam-${s.key}`);
+    const selBtn = document.getElementById(`sel-${s.key}`);
+    const rmBtn = document.getElementById(`rm-${s.key}`);
+    const cameraInput = document.getElementById(`camera-${s.key}`);
+    const fileInput = document.getElementById(`file-${s.key}`);
+
+    zone.onclick = (e) => {
+      if (e.target.tagName === 'VIDEO' || e.target.tagName === 'IMG') return;
+      fileInput.click();
+    };
+
+    camBtn.onclick = () => cameraInput.click();
+    selBtn.onclick = () => fileInput.click();
+    rmBtn.onclick = () => removeSlot(s.key);
+
+    cameraInput.onchange = () => {
+      if (cameraInput.files.length > 0) setSlotImage(s.key, cameraInput.files[0]);
+    };
+    fileInput.onchange = () => {
+      if (fileInput.files.length > 0) setSlotImage(s.key, fileInput.files[0]);
+    };
+  });
+}
+
+function setSlotImage(key, file) {
+  if (slotData[key]?.previewUrl) URL.revokeObjectURL(slotData[key].previewUrl);
+  slotData[key] = { file, previewUrl: URL.createObjectURL(file) };
+  const preview = document.getElementById(`preview-${key}`);
+  const ph = document.getElementById(`ph-${key}`);
+  const zone = document.getElementById(`zone-${key}`);
+  const badge = document.getElementById(`badge-${key}`);
+  const rmBtn = document.getElementById(`rm-${key}`);
+
+  preview.src = slotData[key].previewUrl;
+  preview.style.display = 'block';
+  ph.style.display = 'none';
+  zone.classList.add('has-image');
+  badge.className = 'slot-badge done';
+  badge.textContent = '已上传';
+  rmBtn.style.display = 'block';
+  hideError();
+  updateSubmitBtn();
+}
+
+function removeSlot(key) {
+  if (slotData[key]?.previewUrl) URL.revokeObjectURL(slotData[key].previewUrl);
+  delete slotData[key];
+  const preview = document.getElementById(`preview-${key}`);
+  const ph = document.getElementById(`ph-${key}`);
+  const zone = document.getElementById(`zone-${key}`);
+  const badge = document.getElementById(`badge-${key}`);
+  const rmBtn = document.getElementById(`rm-${key}`);
+
+  preview.style.display = 'none';
+  ph.style.display = 'flex';
+  zone.classList.remove('has-image');
+  badge.className = 'slot-badge';
+  const slot = SLOTS.find(s => s.key === key);
+  badge.textContent = slot.required ? '必需' : '可选';
+  rmBtn.style.display = 'none';
+  document.getElementById(`camera-${key}`).value = '';
+  document.getElementById(`file-${key}`).value = '';
+  updateSubmitBtn();
+}
+
+btnSubmit.onclick = async function() {
+  const keys = Object.keys(slotData).filter(k => slotData[k].file);
+  if (keys.length === 0) return;
+
+  hideError();
+  loading.classList.add('show');
+  btnSubmit.disabled = true;
+  resultCard.classList.remove('show');
+
+  const fd = new FormData();
+  keys.forEach(k => fd.append(k, slotData[k].file));
+
+  try {
+    const resp = await fetch('/api/measure', { method: 'POST', body: fd });
+    const contentType = resp.headers.get('content-type') || '';
+    if (!contentType.includes('application/json')) {
+      if (resp.status === 413) {
+        throw new Error('照片总大小超过 50 MB，请保留清晰度并适当压缩后重试');
+      }
+      throw new Error(`服务器响应异常（HTTP ${resp.status}）`);
+    }
+    const data = await resp.json();
+    if (!resp.ok) {
+      let msg = data.error || '测量失败';
+      if (data.details && data.details.length > 0) {
+        msg += '\n\n具体原因：\n' + data.details.map((d, i) => (i+1) + '. ' + d).join('\n');
+        msg += '\n\n请根据提示重新拍照上传';
+      }
+      showError(msg);
+      return;
+    }
+
+    const avg = data.average;
+    document.getElementById('lenMm').textContent = avg.foot_length + ' mm';
+    document.getElementById('lenCm').textContent = (avg.foot_length / 10).toFixed(1) + ' cm';
+    document.getElementById('ballMm').textContent = avg.ball_width + ' mm';
+    document.getElementById('ballCm').textContent = (avg.ball_width / 10).toFixed(1) + ' cm';
+    document.getElementById('heelMm').textContent = avg.heel_width == null ? '暂不可测' : avg.heel_width + ' mm';
+    document.getElementById('heelCm').textContent = avg.heel_width == null ? '需后续方案' : (avg.heel_width / 10).toFixed(1) + ' cm';
+
+    const confidenceText = { high: '高置信度', medium: '中置信度', low: '低置信度' };
+    const confidence = data.dimension_confidence || {};
+    [['lenConfidence', 'foot_length'], ['ballConfidence', 'ball_width'], ['heelConfidence', 'heel_width']]
+      .forEach(([id, key]) => {
+        const badge = document.getElementById(id);
+        const level = confidence[key];
+        badge.textContent = confidenceText[level] || '未评估';
+        badge.className = 'confidence-badge ' + (level || 'medium');
+      });
+    const quality = data.quality_grade;
+    const confidenceSummary = document.getElementById('confidenceSummary');
+    confidenceSummary.textContent = quality
+      ? `整体${confidenceText[quality]}${data.retake_recommended ? '，建议按提示重拍' : ''}`
+      : '整体置信度未评估';
+    confidenceSummary.className = 'confidence-summary show ' + (quality || 'medium');
+
+    const warningMsg = document.getElementById('warningMsg');
+    if (data.warnings?.length) {
+      warningMsg.textContent = data.warnings.join('；');
+      warningMsg.style.display = 'block';
+    } else {
+      warningMsg.style.display = 'none';
+    }
+
+    document.getElementById('resultHeader').textContent =
+      data.mode === 'multiview' ? '三视图联合测量结果' : '正上方照片测量结果';
+
+    const imgsDiv = document.getElementById('resultImgs');
+    imgsDiv.innerHTML = '';
+    data.individual.forEach(r => {
+      const img = document.createElement('img');
+      img.src = r.result_image;
+      imgsDiv.appendChild(img);
+    });
+
+    resultCard.classList.add('show');
+    resultCard.scrollIntoView({ behavior: 'smooth', block: 'start' });
+  } catch (e) {
+    showError('请求失败: ' + e.message);
+  } finally {
+    loading.classList.remove('show');
+    btnSubmit.disabled = false;
+  }
+};
+
+buildSlots();
+</script>
+</body>
+</html>

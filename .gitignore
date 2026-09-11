@@ -1,0 +1,48 @@
+# Python and local environments
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+
+# Private photos, datasets, and generated results
+datasets/
+foot3d/
+diagnostics/
+blind_paper_audit/
+document_scanner_contact_sheets/
+document_scanner_paper_report/
+seg9_preview/
+_reference/
+.edge-preview/
+web/uploads/
+*.jpg
+*.jpeg
+*.png
+*.json
+*.prof
+*.zip
+*.docx
+
+# Public shooting-guide images used by the web page
+!web/static/guide/*.jpg
+
+# Keep only models required by the current web application
+models/*
+!models/paper_candidate_ranker.npz
+!models/paper_lraspp_amodal_v1.onnx
+!models/universal_measurement_v2.npz
+
+# Local configuration and secrets
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.pfx
+*.p12
+
+# Editor and OS files
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
