@@ -8,6 +8,14 @@ from itsdangerous import BadSignature
 
 
 def run():
+    template_path = os.path.join(os.path.dirname(__file__),
+                                 'templates', 'index.html')
+    with open(template_path, encoding='utf-8') as template_file:
+        template = template_file.read()
+    assert 'id="btnSave"' not in template
+    assert '开始测量即自动保存' in template
+    assert 'saveMeasurement(data.save_token, saveGeneration)' in template
+
     old_upload = target.app.config['UPLOAD_FOLDER']
     old_secret = target.app.config['SAVE_TOKEN_SECRET']
     old_save = target._save_measurement_record
