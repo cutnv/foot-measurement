@@ -1190,22 +1190,26 @@ def _refine_paper_edges(img, quad):
             inward *= -1
         ratios = np.linspace(0.04, 0.96, max(80, int(length / 4)))
         samples = start + ratios[:, None] * (end - start)
-        scores = []
-        for offset in np.arange(-25.0, 6.1, 0.5):
-            outer = samples + (offset - 2) * inward
-            inner = samples + (offset + 2) * inward
-            outer_x = np.clip(np.rint(outer[:, 0]).astype(np.int32),
-                              0, gray.shape[1] - 1)
-            outer_y = np.clip(np.rint(outer[:, 1]).astype(np.int32),
-                              0, gray.shape[0] - 1)
-            inner_x = np.clip(np.rint(inner[:, 0]).astype(np.int32),
-                              0, gray.shape[1] - 1)
-            inner_y = np.clip(np.rint(inner[:, 1]).astype(np.int32),
-                              0, gray.shape[0] - 1)
-            contrast = np.abs(
-                gray[outer_y, outer_x] - gray[inner_y, inner_x])
-            scores.append((float(np.percentile(contrast, 70)), offset))
-        strength, offset = max(scores)
+        offsets = np.arange(-25.0, 6.1, 0.5)
+        outer = samples[None, :, :] + (
+            offsets[:, None, None] - 2) * inward
+        inner = samples[None, :, :] + (
+            offsets[:, None, None] + 2) * inward
+        outer_x = np.clip(np.rint(outer[:, :, 0]).astype(np.int32),
+                          0, gray.shape[1] - 1)
+        outer_y = np.clip(np.rint(outer[:, :, 1]).astype(np.int32),
+                          0, gray.shape[0] - 1)
+        inner_x = np.clip(np.rint(inner[:, :, 0]).astype(np.int32),
+                          0, gray.shape[1] - 1)
+        inner_y = np.clip(np.rint(inner[:, :, 1]).astype(np.int32),
+                          0, gray.shape[0] - 1)
+        contrasts = np.abs(
+            gray[outer_y, outer_x] - gray[inner_y, inner_x])
+        strengths = np.percentile(contrasts, 70, axis=1)
+        # 与 max((strength, offset), ...) 一致：强度相同时取较大偏移。
+        best_index = len(strengths) - 1 - int(np.argmax(strengths[::-1]))
+        strength = float(strengths[best_index])
+        offset = offsets[best_index]
         if strength < 15:
             offset = 0
         shifted.append((start + offset * inward, end + offset * inward))
@@ -1790,9 +1794,11 @@ def _recover_paper_from_top_and_sides(img, _scaled=False):
     return None if best is None else best[1].tolist()
 
 
-def _recover_paper_from_three_edges(img):
+def _recover_paper_from_three_edges(img, four_edges=None,
+                                    border_checked=False):
     """用两条短边和一条长边恢复被脚完全遮挡的第四条纸边。"""
-    four_edges = _find_paper_by_border_lines(img)
+    if not border_checked:
+        four_edges = _find_paper_by_border_lines(img)
     if four_edges is not None:
         # 四条强边也可能由脚边、阴影和纸边拼成。先验证该四边形是否
         # 能由真实A4矩形投影得到；不成立时继续走三边几何恢复。
@@ -1946,21 +1952,43 @@ def _recover_paper_from_three_edges(img):
                         area = cv2.contourArea(quad)
                         if not h * w * 0.12 < area < h * w * 0.8:
                             continue
-                        quad_mask = np.zeros((h, w), np.uint8)
-                        cv2.fillConvexPoly(
-                            quad_mask, quad.astype(np.int32), 255)
-                        coverage = cv2.countNonZero(cv2.bitwise_and(
-                            quad_mask, seed)) / seed_area
-                        density = cv2.countNonZero(cv2.bitwise_and(
-                            quad_mask, seed)) / max(area, 1)
+                        quad_mask, roi = _paper_polygon_roi(
+                            quad, (h, w), 0)
+                        if quad_mask is None:
+                            continue
+                        overlap = cv2.countNonZero(cv2.bitwise_and(
+                            quad_mask, seed[roi]))
+                        coverage = overlap / seed_area
+                        density = overlap / max(area, 1)
                         if coverage < 0.45:
                             continue
+                        neutral_white = evidence_features[0][roi]
+                        inside = quad_mask > 0
+                        white_coverage_upper = (
+                            np.count_nonzero(neutral_white & inside) /
+                            evidence_features[3])
+                        if white_coverage_upper < 0.45:
+                            continue
+                        quality = math.log1p(
+                            top_quality + bottom_quality + side_quality)
+                        if best is not None:
+                            broad_coverage_upper = np.count_nonzero(
+                                evidence_features[1][roi] & inside
+                            ) / evidence_features[4]
+                            area_ratio = cv2.countNonZero(quad_mask) / (h * w)
+                            evidence_upper = (
+                                white_coverage_upper * 2.0 +
+                                broad_coverage_upper * 8.0 + 0.10 + 1.25 -
+                                max(0.0, area_ratio - 0.58) * 12.0)
+                            score_upper = (
+                                coverage * 8 + density * 2 +
+                                evidence_upper * 5 + quality * 0.1)
+                            if score_upper < best[0]:
+                                continue
                         evidence = _paper_quad_evidence(
                             img, quad, features=evidence_features)
                         if evidence < 0.5:
                             continue
-                        quality = math.log1p(
-                            top_quality + bottom_quality + side_quality)
                         score = (coverage * 8 + density * 2 +
                                  evidence * 5 + quality * 0.1)
                         if best is None or score > best[0]:
@@ -3539,6 +3567,21 @@ def _adaptive_multiview_paper_corners(originals, normalized, image_size,
     saturations = (30, 48, 80)
     if prepared is None:
         prepared = {}
+    evidence_cache = prepared.setdefault('quad_evidence_cache', {})
+
+    def cached_evidence(source, quad, features):
+        source_id = id(source)
+        entry = evidence_cache.get(source_id)
+        if entry is None:
+            entry = (source, {})
+            evidence_cache[source_id] = entry
+        points = np.ascontiguousarray(quad, dtype=np.float32)
+        key = points.tobytes()
+        if key not in entry[1]:
+            entry[1][key] = _paper_quad_evidence(
+                source, points, features=features)
+        return entry[1][key]
+
     if 'partials' not in prepared:
         pending_saturations = (saturations if strict_corners is None else
                                saturations[1:])
@@ -3580,10 +3623,12 @@ def _adaptive_multiview_paper_corners(originals, normalized, image_size,
         feature_results = prepared['features']
     if edge_recovery and 'three_edges' not in prepared:
         recover = recover_three_edges or _recover_paper_from_three_edges
+        relaxed_borders = prepared.get('relaxed_borders', {})
         with ThreadPoolExecutor(max_workers=3) as executor:
-            futures = [executor.submit(
-                recover, image)
-                for image in normalized]
+            futures = [
+                executor.submit(recover, image, relaxed_borders[index], True)
+                if index in relaxed_borders else executor.submit(recover, image)
+                for index, image in enumerate(normalized)]
             prepared['three_edges'] = [future.result() for future in futures]
     if fixed_corners is None:
         fixed_corners = [None] * len(normalized)
@@ -3591,8 +3636,8 @@ def _adaptive_multiview_paper_corners(originals, normalized, image_size,
             originals, normalized, fixed_corners)):
         if fixed is not None:
             quad = np.asarray(fixed, np.float32)
-            evidence = _paper_quad_evidence(
-                image, quad, features=feature_results[view_index])
+            evidence = cached_evidence(
+                image, quad, feature_results[view_index])
             candidate_sets.append([(quad, False, -max(evidence, 0.5))])
             continue
         candidates = []
@@ -3623,12 +3668,11 @@ def _adaptive_multiview_paper_corners(originals, normalized, image_size,
                         _paper_evidence_features(coarse_source))
                 coarse_source, coarse_scale, coarse_features = \
                     coarse_score_cache[key]
-                evidence = _paper_quad_evidence(
-                    coarse_source, raw_quad * coarse_scale,
-                    features=coarse_features)
+                evidence = cached_evidence(
+                    coarse_source, raw_quad * coarse_scale, coarse_features)
             else:
-                evidence = _paper_quad_evidence(
-                    source, raw_quad, features=evidence_features)
+                evidence = cached_evidence(
+                    source, raw_quad, evidence_features)
             if evidence_floor is not None:
                 evidence = max(evidence, evidence_floor)
             if evidence < 0.5:
@@ -3741,8 +3785,11 @@ def _adaptive_multiview_paper_corners(originals, normalized, image_size,
                             primary, base, edge_index), scale,
                             0.24 + source_penalty, source)
             if physical_recovery and not candidates:
-                relaxed_border = _find_paper_by_border_lines(
-                    source, relaxed=True)
+                relaxed_borders = prepared.setdefault('relaxed_borders', {})
+                if view_index not in relaxed_borders:
+                    relaxed_borders[view_index] = _find_paper_by_border_lines(
+                        source, relaxed=True)
+                relaxed_border = relaxed_borders[view_index]
                 anchors = [relaxed_border, top_and_sides, border]
                 if learned_recovery and learned_trusted:
                     anchors.append(learned)
@@ -3754,18 +3801,16 @@ def _adaptive_multiview_paper_corners(originals, normalized, image_size,
                         source, allow_grabcut=False)
                     approximate_evidence = (
                         -10.0 if approximate is None else
-                        _paper_quad_evidence(
-                            source, np.asarray(approximate, np.float32),
-                            features=evidence_features))
+                        cached_evidence(
+                            source, approximate, evidence_features))
                     if approximate_evidence < 5.0:
                         approximate = auto_detect_corners(source)
                     anchors.append(approximate)
                 for anchor in anchors:
                     if anchor is None:
                         continue
-                    anchor_evidence = _paper_quad_evidence(
-                        source, np.asarray(anchor, np.float32),
-                        features=evidence_features)
+                    anchor_evidence = cached_evidence(
+                        source, anchor, evidence_features)
                     for projected, displacement in _physical_a4_candidates(
                             source, anchor):
                         inherited_evidence = max(
@@ -3810,8 +3855,11 @@ def _adaptive_multiview_paper_corners(originals, normalized, image_size,
                 key = id(score_source)
                 if key not in exact_cache:
                     exact_cache[key] = _paper_evidence_features(score_source)
+                base = cached_evidence(
+                    score_source, raw_quad, exact_cache[key])
                 evidence = _paper_quad_recovery_evidence(
-                    score_source, raw_quad, features=exact_cache[key])
+                    score_source, raw_quad, features=exact_cache[key],
+                    base=base)
                 if evidence_floor is not None:
                     evidence = max(evidence, evidence_floor)
                 if evidence >= 0.5:
@@ -3873,14 +3921,16 @@ def _select_adaptive_multiview_paper_corners(
         fixed_corners=fixed_corners, prepared=prepared,
         strict_corners=strict_corners,
         recover_three_edges=recover_three_edges)
-    physical = _adaptive_multiview_paper_corners(
-        originals, normalized, image_size, physical_recovery=True,
-        fixed_corners=fixed_corners, prepared=prepared,
-        strict_corners=strict_corners,
-        recover_three_edges=recover_three_edges)
     baseline_accepted = (baseline is not None and
-                         np.isfinite(baseline[2]) and
-                         baseline[2] <= MAX_MULTIVIEW_REPROJECTION_PX)
+                          np.isfinite(baseline[2]) and
+                          baseline[2] <= MAX_MULTIVIEW_REPROJECTION_PX)
+    physical = None
+    if not baseline_accepted:
+        physical = _adaptive_multiview_paper_corners(
+            originals, normalized, image_size, physical_recovery=True,
+            fixed_corners=fixed_corners, prepared=prepared,
+            strict_corners=strict_corners,
+            recover_three_edges=recover_three_edges)
     classic = (baseline if baseline_accepted else
                physical if baseline is None else baseline
                if physical is None else
@@ -4132,10 +4182,11 @@ def process_multiview_images(images, image_metadata=None):
     focal_hint_px = _multiview_focal_hint(image_metadata, image_size)
     three_edge_cache = {}
 
-    def recover_three_edges(image):
+    def recover_three_edges(image, four_edges=None, border_checked=False):
         key = id(image)
         if key not in three_edge_cache:
-            three_edge_cache[key] = _recover_paper_from_three_edges(image)
+            three_edge_cache[key] = _recover_paper_from_three_edges(
+                image, four_edges, border_checked)
         return three_edge_cache[key]
 
     learned_pose_corners = [_learned_paper_candidate(image) for image in images]
