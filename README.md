@@ -101,6 +101,21 @@ python web/test_paper_recovery.py
 - 正式对外部署前应配置 HTTPS、访问控制、结果文件清理、数据库、备份和隐私策略。
 - Nginx 配置文件仅为反向代理示例，需根据实际域名和证书修改。
 
+## 数据后台
+
+后台地址：`/admin`。支持按测量编号查询、分页查看、导出 CSV，以及查看或下载轮廓图；后台不提供修改和删除数据的功能。
+
+后台使用独立只读数据库账号。启动前配置：
+
+```dotenv
+ADMIN_DATABASE_URL=postgresql://foot_reader:密码@数据库地址:5432/foot_measurement
+ADMIN_USERNAME=管理员账号
+ADMIN_PASSWORD=管理员密码
+ADMIN_SESSION_SECRET=至少32位随机字符串
+```
+
+本地 HTTP 开发时使用 `SESSION_COOKIE_SECURE=false`；配置 HTTPS 后改为 `true`。未配置管理员账号、密码或只读数据库连接时，后台保持禁用。
+
 ## 当前使用的模型
 
 - `paper_candidate_ranker.npz`

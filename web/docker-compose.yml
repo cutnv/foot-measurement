@@ -47,7 +47,12 @@ services:
         condition: service_healthy
     environment:
       DATABASE_URL: ${DATABASE_URL:-postgresql://foot_app:${APP_DB_PASSWORD:-foot_app_dev}@db:5432/${POSTGRES_DB:-foot_measurement}}
+      ADMIN_DATABASE_URL: ${ADMIN_DATABASE_URL:-postgresql://foot_reader:${READER_DB_PASSWORD:-foot_reader_dev}@db:5432/${POSTGRES_DB:-foot_measurement}}
       SAVE_TOKEN_SECRET: ${SAVE_TOKEN_SECRET:-development-only-change-before-production}
+      ADMIN_SESSION_SECRET: ${ADMIN_SESSION_SECRET:-development-admin-session-change-before-production}
+      ADMIN_USERNAME: ${ADMIN_USERNAME:-}
+      ADMIN_PASSWORD: ${ADMIN_PASSWORD:-}
+      SESSION_COOKIE_SECURE: ${SESSION_COOKIE_SECURE:-false}
     ports:
       - "5000:5000"
     volumes:

@@ -1,6 +1,10 @@
 import os
 import uuid
 import itertools
+import csv
+import hashlib
+import hmac
+import io
 import json
 import math
 import re
@@ -9,9 +13,11 @@ import struct
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
+from functools import wraps
 import cv2
 import numpy as np
-from flask import Flask, request, jsonify, send_from_directory, render_template
+from flask import (Flask, Response, abort, jsonify, redirect, render_template,
+                   request, send_file, send_from_directory, session, url_for)
 from itsdangerous import BadSignature, SignatureExpired, URLSafeTimedSerializer
 
 app = Flask(__name__)
@@ -19,6 +25,16 @@ app.config['MAX_CONTENT_LENGTH'] = 16 * 1024 * 1024
 app.config['UPLOAD_FOLDER'] = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'uploads')
 app.config['SAVE_TOKEN_SECRET'] = (
     os.environ.get('SAVE_TOKEN_SECRET') or secrets.token_urlsafe(32))
+app.config['SECRET_KEY'] = (
+    os.environ.get('ADMIN_SESSION_SECRET') or
+    app.config['SAVE_TOKEN_SECRET'])
+app.config.update(
+    SESSION_COOKIE_HTTPONLY=True,
+    SESSION_COOKIE_SAMESITE='Strict',
+    SESSION_COOKIE_SECURE=(
+        os.environ.get('SESSION_COOKIE_SECURE', '').lower() in
+        {'1', 'true', 'yes'}),
+)
 
 os.makedirs(app.config['UPLOAD_FOLDER'], exist_ok=True)
 
@@ -41,6 +57,9 @@ _RESULT_FILE_RE = re.compile(r'^result_(?:multi_)?[0-9a-f]{32}\.png$')
 _PAPER_RANKER = None
 _MEASUREMENT_FUSION = None
 _PAPER_SEGMENTER_LOCAL = threading.local()
+_ADMIN_LOGIN_FAILURES = []
+_ADMIN_LOGIN_LOCK = threading.Lock()
+_MEASUREMENT_CODE_RE = re.compile(r'^FM-\d{6}$')
 
 
 def _save_serializer():
@@ -140,10 +159,7 @@ threading.Thread(
     target=_result_cleanup_loop, name='result-cleanup', daemon=True).start()
 
 
-def _database_connection():
-    database_url = os.environ.get('DATABASE_URL')
-    if not database_url:
-        raise RuntimeError('DATABASE_URL 未配置')
+def _open_database_connection(database_url):
     try:
         import psycopg
     except ImportError as exc:
@@ -151,6 +167,20 @@ def _database_connection():
     return psycopg.connect(
         database_url, connect_timeout=3,
         options='-c statement_timeout=5000')
+
+
+def _database_connection():
+    database_url = os.environ.get('DATABASE_URL')
+    if not database_url:
+        raise RuntimeError('DATABASE_URL 未配置')
+    return _open_database_connection(database_url)
+
+
+def _admin_database_connection():
+    database_url = os.environ.get('ADMIN_DATABASE_URL')
+    if not database_url:
+        raise RuntimeError('ADMIN_DATABASE_URL 未配置')
+    return _open_database_connection(database_url)
 
 
 def _lookup_measurement_code(save_nonce):
@@ -180,6 +210,120 @@ def _save_measurement_record(data, image_png):
     if not row or not row[0]:
         raise RuntimeError('数据库未返回测量编号')
     return row[0]
+
+
+def _admin_credentials():
+    username = os.environ.get('ADMIN_USERNAME', '')
+    password = os.environ.get('ADMIN_PASSWORD', '')
+    return username, password
+
+
+def _admin_session_tag(username, password):
+    secret = app.config['SECRET_KEY']
+    if isinstance(secret, str):
+        secret = secret.encode('utf-8')
+    return hmac.new(
+        secret, f'{username}\0{password}'.encode('utf-8'),
+        hashlib.sha256).hexdigest()
+
+
+def _admin_authenticated():
+    username, password = _admin_credentials()
+    if not username or not password:
+        return False
+    expected = _admin_session_tag(username, password)
+    actual = session.get('admin_auth', '')
+    return isinstance(actual, str) and hmac.compare_digest(actual, expected)
+
+
+def _admin_login_blocked(record_failure=False):
+    now = time.monotonic()
+    cutoff = now - 5 * 60
+    with _ADMIN_LOGIN_LOCK:
+        _ADMIN_LOGIN_FAILURES[:] = [
+            value for value in _ADMIN_LOGIN_FAILURES if value >= cutoff]
+        blocked = len(_ADMIN_LOGIN_FAILURES) >= 8
+        if record_failure and not blocked:
+            _ADMIN_LOGIN_FAILURES.append(now)
+        return blocked
+
+
+def _admin_required(view):
+    @wraps(view)
+    def wrapped(*args, **kwargs):
+        if not _admin_authenticated():
+            return redirect(url_for('admin_login'))
+        return view(*args, **kwargs)
+    return wrapped
+
+
+def _admin_search_term(value):
+    value = (value or '').strip().upper()
+    if len(value) > 32 or (value and not re.fullmatch(r'[A-Z0-9-]+', value)):
+        raise ValueError('编号格式无效')
+    return value
+
+
+def _admin_measurement_rows(search, page, per_page=25):
+    where = ''
+    parameters = []
+    if search:
+        where = 'WHERE measurement_code ILIKE %s'
+        parameters.append(f'%{search}%')
+    with _admin_database_connection() as connection:
+        with connection.cursor() as cursor:
+            cursor.execute(
+                f'SELECT count(*) FROM public.shoe_measurements {where}',
+                parameters)
+            total = int(cursor.fetchone()[0])
+            cursor.execute(
+                f'''SELECT measurement_code, foot_side, foot_length_mm,
+                           ball_width_mm, heel_width_mm, quality_grade,
+                           dimension_confidence, warnings, created_at,
+                           expires_at
+                    FROM public.shoe_measurements
+                    {where}
+                    ORDER BY created_at DESC
+                    LIMIT %s OFFSET %s''',
+                [*parameters, per_page, (page - 1) * per_page])
+            rows = cursor.fetchall()
+    columns = (
+        'measurement_code', 'foot_side', 'foot_length_mm', 'ball_width_mm',
+        'heel_width_mm', 'quality_grade', 'dimension_confidence', 'warnings',
+        'created_at', 'expires_at')
+    return [dict(zip(columns, row)) for row in rows], total
+
+
+def _admin_measurement_image(measurement_code):
+    with _admin_database_connection() as connection:
+        with connection.cursor() as cursor:
+            cursor.execute(
+                '''SELECT result_image_png
+                   FROM public.shoe_measurements
+                   WHERE measurement_code = %s''',
+                (measurement_code,))
+            row = cursor.fetchone()
+    return None if row is None else bytes(row[0])
+
+
+def _admin_measurement_export(search):
+    where = ''
+    parameters = []
+    if search:
+        where = 'WHERE measurement_code ILIKE %s'
+        parameters.append(f'%{search}%')
+    with _admin_database_connection() as connection:
+        with connection.cursor() as cursor:
+            cursor.execute(
+                f'''SELECT measurement_code, foot_side, foot_length_mm,
+                           ball_width_mm, heel_width_mm, quality_grade,
+                           dimension_confidence, warnings, created_at,
+                           expires_at
+                    FROM public.shoe_measurements
+                    {where}
+                    ORDER BY created_at DESC''',
+                parameters)
+            return cursor.fetchall()
 
 
 def _order_box(box):
@@ -5252,6 +5396,139 @@ def process_single_image(file):
 @app.route('/')
 def index():
     return render_template('index.html')
+
+
+@app.after_request
+def protect_admin_responses(response):
+    if request.path.startswith('/admin'):
+        response.headers['Cache-Control'] = 'no-store'
+        response.headers['X-Frame-Options'] = 'DENY'
+        response.headers['Referrer-Policy'] = 'no-referrer'
+        response.headers['Content-Security-Policy'] = (
+            "default-src 'self'; style-src 'self' 'unsafe-inline'; "
+            "img-src 'self' data:; form-action 'self'; "
+            "frame-ancestors 'none'; base-uri 'none'")
+    return response
+
+
+@app.route('/admin')
+def admin_index():
+    return redirect(url_for('admin_measurements'))
+
+
+@app.route('/admin/login', methods=['GET', 'POST'])
+def admin_login():
+    username, password = _admin_credentials()
+    configured = bool(username and password and
+                      os.environ.get('ADMIN_DATABASE_URL'))
+    if _admin_authenticated():
+        return redirect(url_for('admin_measurements'))
+    error = None
+    status = 200
+    if not configured:
+        error = '后台尚未配置管理员账号或只读数据库连接。'
+        status = 503
+    elif request.method == 'POST':
+        if _admin_login_blocked():
+            error = '失败次数过多，请5分钟后再试。'
+            status = 429
+        else:
+            submitted_username = request.form.get('username', '')
+            submitted_password = request.form.get('password', '')
+            username_valid = hmac.compare_digest(
+                submitted_username, username)
+            password_valid = hmac.compare_digest(
+                submitted_password, password)
+            valid = username_valid and password_valid
+            if valid:
+                with _ADMIN_LOGIN_LOCK:
+                    _ADMIN_LOGIN_FAILURES.clear()
+                session.clear()
+                session['admin_auth'] = _admin_session_tag(username, password)
+                return redirect(url_for('admin_measurements'))
+            _admin_login_blocked(record_failure=True)
+            error = '账号或密码错误。'
+            status = 401
+    return render_template(
+        'admin.html', login=True, configured=configured, error=error), status
+
+
+@app.route('/admin/logout', methods=['POST'])
+def admin_logout():
+    session.clear()
+    return redirect(url_for('admin_login'))
+
+
+@app.route('/admin/measurements')
+@_admin_required
+def admin_measurements():
+    try:
+        search = _admin_search_term(request.args.get('q'))
+        page = max(1, min(int(request.args.get('page', '1')), 100000))
+    except (TypeError, ValueError):
+        return render_template(
+            'admin.html', login=False, rows=[], total=0, page=1,
+            pages=1, search='', error='查询参数无效。'), 400
+    try:
+        rows, total = _admin_measurement_rows(search, page)
+    except Exception:
+        app.logger.exception('后台查询测量记录失败')
+        return render_template(
+            'admin.html', login=False, rows=[], total=0, page=page,
+            pages=1, search=search,
+            error='数据库暂时不可用。'), 503
+    pages = max(1, math.ceil(total / 25))
+    return render_template(
+        'admin.html', login=False, rows=rows, total=total, page=page,
+        pages=pages, search=search, error=None)
+
+
+@app.route('/admin/measurements.csv')
+@_admin_required
+def admin_measurements_csv():
+    try:
+        search = _admin_search_term(request.args.get('q'))
+        rows = _admin_measurement_export(search)
+    except ValueError:
+        return Response('查询参数无效。', status=400, mimetype='text/plain')
+    except Exception:
+        app.logger.exception('后台导出测量记录失败')
+        return Response('数据库暂时不可用。', status=503,
+                        mimetype='text/plain')
+    output = io.StringIO(newline='')
+    writer = csv.writer(output)
+    writer.writerow([
+        '测量编号', '足别', '脚长(mm)', '脚掌宽(mm)', '脚跟宽(mm)',
+        '质量', '尺寸置信度', '提示', '测量时间', '到期时间'])
+    for row in rows:
+        writer.writerow([
+            row[0], '左脚' if row[1] == 'left' else '右脚',
+            row[2], row[3], row[4], row[5],
+            json.dumps(row[6], ensure_ascii=False),
+            '；'.join(row[7] or []), row[8].isoformat(), row[9].isoformat()])
+    return Response(
+        '\ufeff' + output.getvalue(), mimetype='text/csv',
+        headers={'Content-Disposition':
+                 'attachment; filename=foot-measurements.csv'})
+
+
+@app.route('/admin/measurements/<measurement_code>/outline.png')
+@_admin_required
+def admin_measurement_outline(measurement_code):
+    measurement_code = measurement_code.upper()
+    if not _MEASUREMENT_CODE_RE.fullmatch(measurement_code):
+        abort(404)
+    try:
+        image_png = _admin_measurement_image(measurement_code)
+    except Exception:
+        app.logger.exception('后台读取轮廓图失败')
+        abort(503)
+    if image_png is None:
+        abort(404)
+    return send_file(
+        io.BytesIO(image_png), mimetype='image/png',
+        download_name=f'{measurement_code}.png',
+        as_attachment=request.args.get('download') == '1', max_age=0)
 
 
 @app.route('/uploads/<path:filename>')

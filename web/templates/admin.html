@@ -1,0 +1,92 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>{% if login %}后台登录{% else %}测量数据后台{% endif %} · FitFoot</title>
+<style>
+:root{--ink:#17242d;--muted:#657680;--blue:#176b87;--blue-soft:#e6f2f5;--paper:#fff;--canvas:#eef3f4;--line:#d5e0e3;--orange:#ce5a34;--danger:#aa352d;--green:#26735b}
+*{box-sizing:border-box}html{background:var(--canvas)}body{margin:0;color:var(--ink);font-family:"Microsoft YaHei UI","PingFang SC",system-ui,sans-serif;background:linear-gradient(180deg,#f7fafb 0,#eef3f4 220px);min-height:100vh}
+button,input,a{font:inherit}button:focus-visible,input:focus-visible,a:focus-visible{outline:3px solid rgba(23,107,135,.24);outline-offset:2px}
+.ruler{height:10px;background:repeating-linear-gradient(90deg,var(--blue) 0 1px,transparent 1px 10px),linear-gradient(var(--blue),var(--blue));background-size:auto 6px,100% 1px;background-repeat:repeat-x,no-repeat;background-position:left bottom,left bottom;opacity:.72}
+.shell{width:min(1180px,calc(100% - 32px));margin:0 auto;padding:24px 0 42px}.masthead{display:flex;justify-content:space-between;gap:24px;align-items:end;margin-bottom:22px}.eyebrow{font:700 .7rem/1.2 "Arial Narrow",sans-serif;letter-spacing:.16em;color:var(--blue)}h1{font-size:clamp(1.7rem,4vw,2.65rem);letter-spacing:-.045em;margin:7px 0 0}.sub{margin:7px 0 0;color:var(--muted);font-size:.84rem}.logout{border:1px solid var(--line);background:var(--paper);border-radius:8px;padding:9px 13px;color:var(--ink);cursor:pointer}
+.panel{background:var(--paper);border:1px solid rgba(23,36,45,.08);box-shadow:0 12px 34px rgba(35,62,72,.07)}.toolbar{display:grid;grid-template-columns:auto minmax(250px,1fr) auto;gap:16px;align-items:center;padding:18px}.count{padding-right:16px;border-right:1px solid var(--line)}.count strong{display:block;font:750 1.55rem/1 "Arial Narrow",sans-serif;color:var(--blue);font-variant-numeric:tabular-nums}.count span{font-size:.68rem;color:var(--muted)}.search{display:flex;gap:8px}.search input{width:100%;min-width:0;border:1px solid var(--line);border-radius:8px;padding:10px 12px;color:var(--ink);background:#fbfdfd}.button{display:inline-flex;justify-content:center;align-items:center;border:0;border-radius:8px;padding:10px 14px;background:var(--blue);color:#fff;text-decoration:none;font-weight:700;font-size:.8rem;cursor:pointer}.button.secondary{background:var(--ink)}
+.error{margin:0 0 16px;padding:12px 14px;border-left:4px solid var(--danger);background:#fff0ee;color:var(--danger);font-size:.82rem}.table-wrap{overflow-x:auto;border-top:1px solid var(--line)}table{width:100%;border-collapse:collapse;white-space:nowrap}th{text-align:left;padding:11px 13px;background:#f5f8f8;color:#687982;font-size:.68rem;letter-spacing:.04em}td{padding:13px;border-top:1px solid #e7edef;font-size:.79rem;font-variant-numeric:tabular-nums}tbody tr:hover{background:#f8fbfb}.code{font:750 .8rem/1 "Arial Narrow",sans-serif;letter-spacing:.04em;color:var(--blue)}.side,.quality{display:inline-block;border-radius:999px;padding:4px 8px;font-size:.68rem;font-weight:700}.side{background:var(--blue-soft);color:var(--blue)}.quality.high{background:#e2f3ec;color:var(--green)}.quality.medium{background:#fff0d4;color:#825d10}.quality.low,.quality.unrated{background:#f1f2f3;color:#6d7478}.outline{color:var(--orange);font-weight:700;text-decoration:none;border-bottom:1px solid rgba(206,90,52,.35)}.warnings{max-width:280px;overflow:hidden;text-overflow:ellipsis;color:var(--muted)}
+.empty{padding:58px 20px;text-align:center}.empty strong{display:block;font-size:1rem}.empty span{display:block;color:var(--muted);font-size:.8rem;margin-top:7px}.pagination{display:flex;align-items:center;justify-content:center;gap:10px;padding:18px;border-top:1px solid var(--line)}.pagination a{color:var(--blue);text-decoration:none;border:1px solid var(--line);border-radius:7px;padding:7px 10px;background:#fff}.pagination span{font-size:.75rem;color:var(--muted)}
+.login-shell{width:min(430px,calc(100% - 32px));margin:9vh auto 0}.login-card{padding:28px}.login-mark{display:flex;align-items:center;gap:10px;color:var(--blue);font:800 .72rem/1 "Arial Narrow",sans-serif;letter-spacing:.14em}.login-mark::before{content:"";width:34px;height:12px;border-top:3px solid var(--orange);border-bottom:1px solid var(--orange)}.login-card h1{font-size:2rem;margin:18px 0 8px}.login-card p{color:var(--muted);font-size:.82rem;line-height:1.6}.field{display:block;margin-top:16px}.field span{display:block;font-size:.74rem;font-weight:700;margin-bottom:6px}.field input{width:100%;border:1px solid var(--line);border-radius:8px;padding:12px;background:#fbfdfd}.login-card .button{width:100%;margin-top:20px;padding:13px}.login-card .error{margin:16px 0 0}.back{display:inline-block;margin-top:18px;color:var(--blue);font-size:.76rem}.security-note{margin-top:18px!important;padding-top:15px;border-top:1px solid var(--line);font-size:.72rem!important}
+@media(max-width:720px){.shell{width:min(100% - 20px,1180px);padding-top:18px}.masthead{align-items:start}.toolbar{grid-template-columns:1fr}.count{border:0;padding:0}.search{grid-template-columns:1fr auto}.export{width:100%}th,td{padding:11px 10px}.login-shell{margin-top:6vh}}
+@media(prefers-reduced-motion:reduce){*{scroll-behavior:auto!important;transition:none!important}}
+</style>
+</head>
+<body>
+<div class="ruler" aria-hidden="true"></div>
+{% if login %}
+<main class="login-shell">
+  <section class="panel login-card" aria-labelledby="loginTitle">
+    <div class="login-mark">FITFOOT / DATA</div>
+    <h1 id="loginTitle">维护人员登录</h1>
+    <p>仅授权维护人员可查看测量尺寸和轮廓图。</p>
+    {% if error %}<div class="error" role="alert">{{ error }}</div>{% endif %}
+    {% if configured %}
+    <form method="post" action="{{ url_for('admin_login') }}">
+      <label class="field"><span>账号</span><input name="username" autocomplete="username" required autofocus></label>
+      <label class="field"><span>密码</span><input name="password" type="password" autocomplete="current-password" required></label>
+      <button class="button" type="submit">登录后台</button>
+    </form>
+    {% endif %}
+    <p class="security-note">后台不提供修改和删除功能。正式公网使用前必须启用 HTTPS。</p>
+    <a class="back" href="{{ url_for('index') }}">返回测量页面</a>
+  </section>
+</main>
+{% else %}
+<main class="shell">
+  <header class="masthead">
+    <div><div class="eyebrow">FITFOOT / MEASUREMENT ARCHIVE</div><h1>测量数据后台</h1><p class="sub">只读查询 · 尺寸导出 · 轮廓核验</p></div>
+    <form method="post" action="{{ url_for('admin_logout') }}"><button class="logout" type="submit">退出登录</button></form>
+  </header>
+  {% if error %}<div class="error" role="alert">{{ error }}</div>{% endif %}
+  <section class="panel" aria-label="测量记录">
+    <div class="toolbar">
+      <div class="count"><strong>{{ total }}</strong><span>条匹配记录</span></div>
+      <form class="search" method="get" action="{{ url_for('admin_measurements') }}">
+        <input name="q" value="{{ search }}" maxlength="32" placeholder="输入测量编号，例如 FM-000029" aria-label="测量编号">
+        <button class="button" type="submit">查询</button>
+      </form>
+      <a class="button secondary export" href="{{ url_for('admin_measurements_csv', q=search) }}">导出 CSV</a>
+    </div>
+    {% if rows %}
+    <div class="table-wrap">
+      <table>
+        <thead><tr><th>测量编号</th><th>足别</th><th>脚长</th><th>脚掌宽</th><th>脚跟宽</th><th>质量</th><th>测量时间</th><th>提示</th><th>轮廓图</th></tr></thead>
+        <tbody>
+        {% for row in rows %}
+          <tr>
+            <td class="code">{{ row.measurement_code }}</td>
+            <td><span class="side">{{ '左脚' if row.foot_side == 'left' else '右脚' }}</span></td>
+            <td>{{ row.foot_length_mm }} mm</td>
+            <td>{{ row.ball_width_mm }} mm</td>
+            <td>{{ row.heel_width_mm if row.heel_width_mm is not none else '—' }}{% if row.heel_width_mm is not none %} mm{% endif %}</td>
+            <td><span class="quality {{ row.quality_grade }}">{{ {'high':'高','medium':'中','low':'低','unrated':'未评级'}.get(row.quality_grade, row.quality_grade) }}</span></td>
+            <td>{{ row.created_at.strftime('%Y-%m-%d %H:%M') }}</td>
+            <td class="warnings" title="{{ '；'.join(row.warnings or []) }}">{{ '；'.join(row.warnings or []) or '—' }}</td>
+            <td><a class="outline" href="{{ url_for('admin_measurement_outline', measurement_code=row.measurement_code) }}" target="_blank" rel="noopener">查看</a> · <a class="outline" href="{{ url_for('admin_measurement_outline', measurement_code=row.measurement_code, download=1) }}">下载</a></td>
+          </tr>
+        {% endfor %}
+        </tbody>
+      </table>
+    </div>
+    {% else %}
+    <div class="empty"><strong>没有找到记录</strong><span>检查测量编号，或清空查询条件查看全部数据。</span></div>
+    {% endif %}
+    {% if pages > 1 %}
+    <nav class="pagination" aria-label="分页">
+      {% if page > 1 %}<a href="{{ url_for('admin_measurements', q=search, page=page-1) }}">上一页</a>{% endif %}
+      <span>第 {{ page }} / {{ pages }} 页</span>
+      {% if page < pages %}<a href="{{ url_for('admin_measurements', q=search, page=page+1) }}">下一页</a>{% endif %}
+    </nav>
+    {% endif %}
+  </section>
+</main>
+{% endif %}
+</body>
+</html>
