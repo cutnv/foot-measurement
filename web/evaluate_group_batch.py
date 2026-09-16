@@ -49,12 +49,21 @@ def main():
     parser.add_argument(
         "--groups", default="",
         help="可选，仅测指定组，例如 1,2,3")
+    parser.add_argument(
+        "--order-manifest", action="append", type=Path, default=[],
+        help="可重复指定已有报告；按input_order使用已确认的三视图顺序")
     args = parser.parse_args()
     selected_groups = {int(value) for value in args.groups.split(",") if value}
     top_indexes = {}
     for pair in filter(None, args.top_indexes.split(",")):
         group, index = pair.split(":", 1)
         top_indexes[int(group)] = int(index)
+    input_orders = {}
+    for manifest in args.order_manifest:
+        for item in json.loads(manifest.read_text(encoding="utf-8")):
+            names = item.get("input_order")
+            if isinstance(names, list) and len(names) == 3:
+                input_orders[int(item["group"])] = names
 
     report = []
     for folder in sorted((item for item in args.folder.iterdir()
@@ -71,8 +80,18 @@ def main():
         images = [read_image(path) for path in paths]
         scores = [top_view_score(image) if image is not None else math.inf
                   for image in images]
-        top = top_indexes.get(group_number(folder), int(np.argmin(scores)))
-        order = [top] + [index for index in range(3) if index != top]
+        group = group_number(folder)
+        confirmed = input_orders.get(group)
+        if confirmed:
+            indexes = {path.name: index for index, path in enumerate(paths)}
+            if any(name not in indexes for name in confirmed):
+                item["error"] = "已确认顺序中的照片不存在"
+                report.append(item)
+                continue
+            order = [indexes[name] for name in confirmed]
+        else:
+            top = top_indexes.get(group, int(np.argmin(scores)))
+            order = [top] + [index for index in range(3) if index != top]
         started = time.perf_counter()
         try:
             result, error = app.process_multiview_images(

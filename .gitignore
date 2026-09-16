@@ -30,6 +30,8 @@ web/uploads/
 models/*
 !models/paper_candidate_ranker.npz
 !models/paper_lraspp_amodal_v1.onnx
+!models/paper_lraspp_fallback_v1.onnx
+!models/foot_lraspp_a4_v2.onnx
 !models/universal_measurement_v2.npz
 
 # Local configuration and secrets

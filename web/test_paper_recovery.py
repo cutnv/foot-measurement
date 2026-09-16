@@ -1,5 +1,6 @@
 from pathlib import Path
 import struct
+import time
 
 import cv2
 import numpy as np
@@ -14,7 +15,11 @@ assert app._severe_multiview_color_cast([18.1, 20.0, 24.0])
 
 ROOT = Path(r'C:\Users\Admin\OneDrive\Desktop\111\group')
 CASES = {21: 2, 22: 2}
-POSE_CASES = {29: 1, 30: 1}
+POSE_CASES = {29: 0, 30: 0}
+POSE_TRUTH = {
+    29: (262.0, 92.0, 61.0),
+    30: (262.0, 92.0, 61.0),
+}
 
 
 def read(path):
@@ -83,8 +88,10 @@ def main():
         images = [read(path) for path in paths]
         order = [top_index] + [index for index in range(3)
                                if index != top_index]
+        started = time.perf_counter()
         result, error = app.process_multiview_images(
             [images[index] for index in order])
+        elapsed = time.perf_counter() - started
         assert error is None, (group, error)
         assert result is not None, group
         assert result['calibration_error_px'] <= \
@@ -92,6 +99,11 @@ def main():
         if group in POSE_CASES:
             assert result['measurement_debug']['projection_mode'] == \
                 'independent_side_consensus', group
+            measured = (result['foot_length'], result['ball_width'],
+                        result['heel_width'])
+            assert all(abs(actual - expected) <= 2.0 for actual, expected in
+                       zip(measured, POSE_TRUTH[group])), (group, measured)
+            assert elapsed <= 10.0, (group, elapsed)
 
 
 if __name__ == '__main__':

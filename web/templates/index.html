@@ -278,6 +278,15 @@ function buildSlots() {
 }
 
 function setSlotImage(key, file) {
+  const duplicate = Object.entries(slotData).find(([otherKey, data]) =>
+    otherKey !== key && data.file.name === file.name &&
+    data.file.size === file.size && data.file.lastModified === file.lastModified);
+  if (duplicate) {
+    const currentLabel = SLOTS.find(s => s.key === key).label;
+    const otherLabel = SLOTS.find(s => s.key === duplicate[0]).label;
+    showError(`${currentLabel}与${otherLabel}选择了同一张照片，请重新选择`);
+    return;
+  }
   if (slotData[key]?.previewUrl) URL.revokeObjectURL(slotData[key].previewUrl);
   slotData[key] = { file, previewUrl: URL.createObjectURL(file) };
   const preview = document.getElementById(`preview-${key}`);

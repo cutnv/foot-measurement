@@ -55,8 +55,24 @@ SAVE_TOKEN_TTL_SECONDS = 30 * 60
 ALLOWED_EXT = {'.jpg', '.jpeg', '.png', '.bmp', '.webp'}
 _RESULT_FILE_RE = re.compile(r'^result_(?:multi_)?[0-9a-f]{32}\.png$')
 _PAPER_RANKER = None
+_PAPER_RANKER_MODEL = os.environ.get(
+    'PAPER_RANKER_MODEL', os.path.join(
+        os.path.dirname(os.path.abspath(__file__)), '..', 'models',
+        'paper_candidate_ranker.npz'))
 _MEASUREMENT_FUSION = None
-_PAPER_SEGMENTER_LOCAL = threading.local()
+_SEGMENTER_LOCAL = threading.local()
+_FOOT_SEGMENTER_MODEL = os.environ.get(
+    'FOOT_SEGMENTER_MODEL', os.path.join(
+        os.path.dirname(os.path.abspath(__file__)), '..', 'models',
+        'foot_lraspp_a4_v2.onnx'))
+_PAPER_SEGMENTER_MODEL = os.environ.get(
+    'PAPER_SEGMENTER_MODEL', os.path.join(
+        os.path.dirname(os.path.abspath(__file__)), '..', 'models',
+        'paper_lraspp_amodal_v1.onnx'))
+_PAPER_SEGMENTER_FALLBACK_MODEL = os.environ.get(
+    'PAPER_SEGMENTER_FALLBACK_MODEL', os.path.join(
+        os.path.dirname(os.path.abspath(__file__)), '..', 'models',
+        'paper_lraspp_fallback_v1.onnx'))
 _ADMIN_LOGIN_FAILURES = []
 _ADMIN_LOGIN_LOCK = threading.Lock()
 _MEASUREMENT_CODE_RE = re.compile(r'^FM-\d{6}$')
@@ -840,8 +856,7 @@ def _paper_candidate_rank_score(img, quad, evidence_features=None,
     """公开四角真值训练的小模型；缺失时退回传统证据，不影响服务。"""
     global _PAPER_RANKER
     if _PAPER_RANKER is None:
-        path = os.path.join(os.path.dirname(os.path.abspath(__file__)),
-                            '..', 'models', 'paper_candidate_ranker.npz')
+        path = _PAPER_RANKER_MODEL
         if not os.path.exists(path):
             _PAPER_RANKER = False
         else:
@@ -859,20 +874,21 @@ def _paper_candidate_rank_score(img, quad, evidence_features=None,
     return 1.0 / (1.0 + math.exp(-float(np.clip(value, -20.0, 20.0))))
 
 
-def _learned_paper_candidate(img):
-    """轻量分割模型补充纸面候选；几何标定仍负责最终取舍。"""
-    model_path = os.path.join(os.path.dirname(os.path.abspath(__file__)),
-                              '..', 'models',
-                              'paper_lraspp_amodal_v1.onnx')
-    if not os.path.exists(model_path):
+def _binary_segmenter_mask(img, model_path, probability):
+    """统一运行 LR-ASPP 二分类模型；每个工作线程复用已加载网络。"""
+    if not model_path or not os.path.exists(model_path):
         return None
-    net = getattr(_PAPER_SEGMENTER_LOCAL, 'net', None)
+    nets = getattr(_SEGMENTER_LOCAL, 'nets', None)
+    if nets is None:
+        nets = {}
+        _SEGMENTER_LOCAL.nets = nets
+    net = nets.get(model_path)
     if net is None:
         try:
             net = cv2.dnn.readNetFromONNX(model_path)
         except cv2.error:
             return None
-        _PAPER_SEGMENTER_LOCAL.net = net
+        nets[model_path] = net
     resized = cv2.resize(img, (384, 512), interpolation=cv2.INTER_AREA)
     rgb = cv2.cvtColor(resized, cv2.COLOR_BGR2RGB).astype(np.float32) / 255.0
     rgb = (rgb - np.float32([0.485, 0.456, 0.406])) / np.float32(
@@ -882,9 +898,16 @@ def _learned_paper_candidate(img):
         logits = net.forward()[0, 0]
     except cv2.error:
         return None
-    mask = (logits >= math.log(0.45 / 0.55)).astype(np.uint8) * 255
-    mask = cv2.resize(mask, (img.shape[1], img.shape[0]),
-                      interpolation=cv2.INTER_NEAREST)
+    threshold = math.log(probability / (1.0 - probability))
+    return cv2.resize(
+        (logits >= threshold).astype(np.uint8) * 255,
+        (img.shape[1], img.shape[0]), interpolation=cv2.INTER_NEAREST)
+
+
+def _paper_candidate_from_segmenter(img, model_path):
+    mask = _binary_segmenter_mask(img, model_path, 0.45)
+    if mask is None:
+        return None
     contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL,
                                    cv2.CHAIN_APPROX_SIMPLE)
     image_area = img.shape[0] * img.shape[1]
@@ -912,6 +935,15 @@ def _learned_paper_candidate(img):
         fill = min(area / quad_area, 1.0)
         choices.append((evidence + rank * 2.0 + fill, quad))
     return None if not choices else max(choices, key=lambda item: item[0])[1]
+
+
+def _learned_paper_candidate(img):
+    """主分割模型无有效纸框时，才运行备用模型。"""
+    candidate = _paper_candidate_from_segmenter(img, _PAPER_SEGMENTER_MODEL)
+    if candidate is not None:
+        return candidate
+    return _paper_candidate_from_segmenter(
+        img, _PAPER_SEGMENTER_FALLBACK_MODEL)
 
 
 def _paper_corner_agreement_count(first, second, image_shape):
@@ -1661,9 +1693,11 @@ def _find_paper_by_border_lines(img, relaxed=True, _scaled=False):
     return _refine_paper_edges(img, best[1]).tolist()
 
 
-def _detect_reliable_paper_corners(img, recover_three_edges=None):
+def _detect_reliable_paper_corners(img, recover_three_edges=None,
+                                   partial=None):
     """仅在纸色框缺少真实边证据时，以高置信四边线纠正。"""
-    partial = detect_partial_paper_corners(img, 30)
+    if partial is None:
+        partial = detect_partial_paper_corners(img, 30)
     if partial is None:
         return None
     features = _paper_evidence_features(img)
@@ -2268,6 +2302,29 @@ def _normalize_multiview_images(images):
             for img in images]
 
 
+def _duplicate_multiview_pair(images):
+    """只拦截近乎相同的上传，避免把正常的相似构图误判为重复。"""
+    thumbnails = [cv2.resize(
+        cv2.cvtColor(image, cv2.COLOR_BGR2GRAY), (64, 64),
+        interpolation=cv2.INTER_AREA).astype(np.float32)
+        for image in images]
+    for first in range(len(thumbnails)):
+        for second in range(first + 1, len(thumbnails)):
+            left, right = thumbnails[first], thumbnails[second]
+            mean_difference = float(np.mean(np.abs(left - right)))
+            if mean_difference > 3.0:
+                continue
+            left_std, right_std = float(left.std()), float(right.std())
+            if min(left_std, right_std) < 1.0:
+                correlation = 1.0 if mean_difference < 0.5 else 0.0
+            else:
+                correlation = float(np.corrcoef(
+                    left.ravel(), right.ravel())[0, 1])
+            if correlation >= 0.995:
+                return first, second
+    return None
+
+
 def _multiview_focal_hint(image_metadata, image_size):
     """把同批照片EXIF等效焦距换算为归一化图像像素焦距。"""
     if not image_metadata:
@@ -2277,6 +2334,63 @@ def _multiview_focal_hint(image_metadata, image_size):
     if len(values) < 2 or max(values) / min(values) > 1.08:
         return None
     return float(max(image_size) * np.median(values) / 36.0)
+
+
+def _learned_foot_mask(img, corners=None):
+    """学习模型仅供标注预览补漏，不单独替代生产测量轮廓。"""
+    mask = _binary_segmenter_mask(img, _FOOT_SEGMENTER_MODEL, 0.35)
+    if mask is None:
+        return None
+    size = max(3, int(round(min(img.shape[:2]) * 0.004))) | 1
+    mask = cv2.morphologyEx(
+        mask, cv2.MORPH_CLOSE, np.ones((size, size), np.uint8))
+    paper = np.ones_like(mask) if corners is None else np.zeros_like(mask)
+    if corners is not None:
+        cv2.fillConvexPoly(paper, np.asarray(corners, np.int32), 1)
+    count, labels, stats, _ = cv2.connectedComponentsWithStats(mask, 8)
+    best = None
+    image_area = img.shape[0] * img.shape[1]
+    for label in range(1, count):
+        area = int(stats[label, cv2.CC_STAT_AREA])
+        if not image_area * 0.025 < area < image_area * 0.55:
+            continue
+        overlap = int(np.count_nonzero((labels == label) & (paper > 0)))
+        if overlap < image_area * 0.015:
+            continue
+        score = overlap + area * 0.1
+        if best is None or score > best[0]:
+            best = score, label
+    return (None if best is None else
+            (labels == best[1]).astype(np.uint8) * 255)
+
+
+def _fuse_foot_mask_votes(components):
+    """融合传统多阈值并填实轮廓内部的误漏区域。"""
+    if len(components) < 2:
+        return None
+    required = math.ceil(len(components) * 0.60)
+    count = np.sum(np.stack([item > 0 for item in components]), axis=0)
+    selected = count >= required
+    result = _largest_mask_component(
+        selected.astype(np.uint8) * 255, min_ratio=0.015)
+    contours, _ = cv2.findContours(
+        result, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    if not contours:
+        return None
+    filled = np.zeros_like(result)
+    cv2.drawContours(filled, [max(contours, key=cv2.contourArea)],
+                     -1, 255, -1)
+    return filled
+
+
+def _finalize_foot_mask(result, paper, margin_ratio):
+    """统一足部掩膜收尾：轻微扩边，可选限制在纸张邻域。"""
+    result = cv2.dilate(result, np.ones((5, 5), np.uint8))
+    if margin_ratio is None:
+        return result
+    margin = max(5, int(round(min(result.shape) * margin_ratio))) | 1
+    allowed = cv2.dilate(paper, np.ones((margin, margin), np.uint8))
+    return cv2.bitwise_and(result, allowed)
 
 
 def _calibrate_multiview(corners, image_size, allow_per_view=False,
@@ -2515,33 +2629,15 @@ def _multiview_foot_mask(img, corners, consensus=False,
         if not consensus and best is not None:
             break
     if consensus:
-        if len(components) < 2:
+        result = _fuse_foot_mask_votes(components)
+        if result is None or cv2.countNonZero(result) == 0:
             return None
-        required = math.ceil(len(components) * 0.60)
-        count = np.sum(np.stack([item > 0 for item in components]), axis=0)
-        result = _largest_mask_component(
-            (count >= required).astype(np.uint8) * 255, min_ratio=0.015)
-        if cv2.countNonZero(result) == 0:
-            return None
-        result = cv2.dilate(result, np.ones((5, 5), np.uint8))
-        if paper_margin_ratio is not None:
-            margin = max(5, int(round(
-                min(result.shape) * paper_margin_ratio))) | 1
-            allowed = cv2.dilate(
-                paper, np.ones((margin, margin), np.uint8))
-            result = cv2.bitwise_and(result, allowed)
-        return result
+        return _finalize_foot_mask(result, paper, paper_margin_ratio)
     if best is None:
         return None
     result = np.zeros_like(mask)
     cv2.drawContours(result, [best[1]], -1, 255, -1)
-    result = cv2.dilate(result, np.ones((5, 5), np.uint8))
-    if paper_margin_ratio is not None:
-        margin = max(5, int(round(
-            min(result.shape) * paper_margin_ratio))) | 1
-        allowed = cv2.dilate(paper, np.ones((margin, margin), np.uint8))
-        result = cv2.bitwise_and(result, allowed)
-    return result
+    return _finalize_foot_mask(result, paper, paper_margin_ratio)
 
 
 def _visual_hull_footprint(masks, cameras, distortions,
@@ -2931,9 +3027,19 @@ def _select_geometry_measurements(measurements, footprint, groundprint,
     return length, ball, heel, heel_stability
 
 
+def _measurements_in_range(measurements):
+    """三项尺寸统一物理边界，供所有恢复路径共同校验。"""
+    if measurements is None:
+        return False
+    length, ball, heel = measurements[:3]
+    return (180 <= length <= 350 and 60 <= ball <= 130 and
+            30 <= heel <= 100)
+
+
 def _measure_footprint(footprint, groundprint, height_map, top_planar_mask,
                        calibrated_per_view=False, paper_recovered=False,
-                       top_fore_angle=None, mirrored_geometry=False):
+                       top_fore_angle=None, mirrored_geometry=False,
+                       single_side_geometry=False):
     occupied_rows = np.flatnonzero(np.any(footprint > 0, axis=1))
     if occupied_rows.size < 180:
         return None
@@ -3076,6 +3182,15 @@ def _measure_footprint(footprint, groundprint, height_map, top_planar_mask,
             ball_value = float(np.mean([
                 max(visual_ball),
                 max(contact_ball) if contact_ball else max(visual_ball)]))
+    mirrored_toe_saturated = bool(
+        single_side_geometry and toe_height >= 115.0 and
+        top_fore_angle is not None and top_fore_angle >= 8.0)
+    if mirrored_toe_saturated:
+        # 单侧重建在脚趾阴影处顶满120 mm高度网格时，轮廓锥已退化，
+        # 不能把纸面单应图上的足背视差当作脚长。用前掌宽推得的有限
+        # 脚趾高度消除纵向视差；这是所有镜像退化样本共用的几何修正。
+        toe_height_prior = float(np.clip(ball_value * 0.35, 22.0, 40.0))
+        length -= toe_height_prior * math.tan(math.radians(top_fore_angle))
     heel_target = baseline - HEEL_WIDTH_RATIO * length
     heel_half_window = max(4, int(round(length * 0.02)))
     heel_rows = range(max(0, int(math.floor(
@@ -3086,7 +3201,13 @@ def _measure_footprint(footprint, groundprint, height_map, top_planar_mask,
     # 三视图在纸面的交集；只有三视图一致吞入强阴影时，才用
     # 高度核心截面排除贴地阴影。纸边恢复不再改取脚踝高度。
     heel_profile = []
-    if silhouette_inflated and toe_geometry_gap <= 4.0:
+    if mirrored_toe_saturated:
+        for row in heel_rows:
+            ground_columns = np.flatnonzero(groundprint[row] > 0)
+            if ground_columns.size >= 2:
+                heel_profile.append((
+                    row, float(ground_columns[-1] - ground_columns[0])))
+    elif silhouette_inflated and toe_geometry_gap <= 4.0:
         core_height = toe_height * 0.65
         for row in heel_rows:
             columns = np.flatnonzero(height_map[row] >= core_height)
@@ -3407,11 +3528,7 @@ def _mirrored_multiview_corners(images, corners, image_size,
         measurements, fallback_used = _degraded_hull_fallback(
             measurements, footprint, groundprint, height_map,
             top_mask, angles)
-        if measurements is None:
-            continue
-        length, ball, heel = measurements[:3]
-        if not (180 <= length <= 350 and 60 <= ball <= 130 and
-                30 <= heel <= 100):
+        if not _measurements_in_range(measurements):
             continue
         intersection = cv2.countNonZero(
             cv2.bitwise_and(footprint, top_mask))
@@ -3429,7 +3546,8 @@ def _mirrored_multiview_corners(images, corners, image_size,
 
 def _single_side_hull_consensus(images, corners, image_size,
                                 paper_recovered, focal_hint_px=None,
-                                paper_images=None, learned_corners=None):
+                                paper_images=None, learned_corners=None,
+                                relaxed_heel=False):
     """共同姿态失败时独立求两侧纸姿态；两份重建一致才放行。"""
     top_corner = np.asarray(corners[0], np.float32)
     top_mask_source = _multiview_foot_mask(images[0], top_corner)
@@ -3494,11 +3612,9 @@ def _single_side_hull_consensus(images, corners, image_size,
                 measurements = _measure_footprint(
                     footprint, groundprint, height_map, top_mask,
                     cameras[1] is not cameras[0], paper_recovered,
-                    top_angle, mirrored_geometry=True)
-                if measurements is None or not (
-                        180 <= measurements[0] <= 350 and
-                        60 <= measurements[1] <= 130 and
-                        30 <= measurements[2] <= 100):
+                    top_angle, mirrored_geometry=True,
+                    single_side_geometry=True)
+                if not _measurements_in_range(measurements):
                     continue
                 intersection = cv2.countNonZero(
                     cv2.bitwise_and(footprint, top_mask))
@@ -3517,8 +3633,9 @@ def _single_side_hull_consensus(images, corners, image_size,
     for left, right in itertools.product(*side_candidates):
         values = np.asarray([left[1][:3], right[1][:3]], np.float32)
         differences = np.abs(values[0] - values[1])
+        heel_tolerance = 24.0 if relaxed_heel else 12.0
         if (differences[0] > 8.0 or differences[1] > 8.0 or
-                differences[2] > 12.0 or
+                differences[2] > heel_tolerance or
                 max(left[5], right[5]) < MIN_MULTIVIEW_SIDE_ANGLE_DEG):
             continue
         score = (left[0] + right[0] -
@@ -3532,20 +3649,31 @@ def _single_side_hull_consensus(images, corners, image_size,
         return None
     left, right = best[1:]
     chosen = max((left, right), key=lambda item: item[0])
-    # 左侧照片提供左边界，右侧照片提供右边界；不直接取两轮廓交集，
-    # 避免把两侧各自的投影误差叠加成过窄脚跟。
+    authoritative_consensus = bool(
+        relaxed_heel or max(left[7], right[7]) >= 15.0)
     fused_ground = np.zeros_like(chosen[2][1])
     for row in range(fused_ground.shape[0]):
         left_columns = np.flatnonzero(left[2][1][row] > 0)
         right_columns = np.flatnonzero(right[2][1][row] > 0)
-        if (left_columns.size and right_columns.size and
-                left_columns[0] <= right_columns[-1]):
-            fused_ground[row, left_columns[0]:right_columns[-1] + 1] = 255
+        if left_columns.size and right_columns.size:
+            if authoritative_consensus:
+                # 无标记白纸存在左右镜像二义性，逐行平均两份独立边界。
+                start = int(round(
+                    (left_columns[0] + right_columns[0]) / 2))
+                stop = int(round(
+                    (left_columns[-1] + right_columns[-1]) / 2))
+            else:
+                # 成熟的普通镜像恢复路径保持原有左右边界融合方式。
+                start = int(left_columns[0])
+                stop = int(right_columns[-1])
+            if start <= stop:
+                fused_ground[row, start:stop + 1] = 255
     fused_hull = (chosen[2][0], fused_ground,
                   chosen[2][2], chosen[2][3])
     fused_measurements = _measure_footprint(
         fused_hull[0], fused_hull[1], fused_hull[3], top_mask,
-        True, paper_recovered, chosen[7], mirrored_geometry=True)
+        True, paper_recovered, chosen[7], mirrored_geometry=True,
+        single_side_geometry=True)
     heel_limits = sorted((left[1][2], right[1][2]))
     if (fused_measurements is not None and
             heel_limits[0] - 4.0 <= fused_measurements[2] <=
@@ -3553,11 +3681,19 @@ def _single_side_hull_consensus(images, corners, image_size,
         chosen_hull = fused_hull
     else:
         chosen_hull = chosen[2]
+    # 俯拍接近垂直时，两份侧视对脚趾前缘的独立误差方向相反，取均值；
+    # 明显斜拍时保留轮廓重合度更高的一份，并由后续视差公式修正。
+    if max(left[7], right[7]) < 15.0:
+        consensus_measurements = tuple(np.mean(values, axis=0).tolist()) + (
+            float(np.mean([left[1][3], right[1][3]])),)
+    else:
+        consensus_measurements = chosen[1]
     masks = [top_mask_source, left[4], right[4]]
     selected_corners = [top_corner, left[3], right[3]]
     return (selected_corners, (masks, *chosen_hull),
             [left[5], right[5]], max(left[6], right[6]),
-            chosen[7])
+            chosen[7], consensus_measurements,
+            authoritative_consensus)
 
 
 def _warp_planar_foot_mask(mask, transform):
@@ -3726,13 +3862,11 @@ def _adaptive_multiview_paper_corners(originals, normalized, image_size,
                 source, points, features=features)
         return entry[1][key]
 
-    if 'partials' not in prepared:
-        pending_saturations = (saturations if strict_corners is None else
-                               saturations[1:])
+    if 'partial_candidates' not in prepared:
         with ThreadPoolExecutor(max_workers=6) as executor:
             partial_futures = [[executor.submit(
                 detect_partial_paper_corners, image, saturation)
-                for saturation in pending_saturations]
+                for saturation in saturations]
                 for image in normalized]
             border_futures = [executor.submit(
                 _find_paper_by_border_lines, image, False)
@@ -3753,18 +3887,19 @@ def _adaptive_multiview_paper_corners(originals, normalized, image_size,
                                else [future.result()
                                      for future in learned_futures])
             feature_results = [future.result() for future in feature_futures]
-        if strict_corners is not None:
-            partial_results = [[strict, *view] for strict, view in zip(
-                strict_corners, partial_results)]
-        prepared.update(partials=partial_results, borders=borders,
+        prepared.update(partial_candidates=partial_results, borders=borders,
                          top_sides=top_side_results,
                          learned=learned_results, features=feature_results)
     else:
-        partial_results = prepared['partials']
+        partial_results = prepared['partial_candidates']
         borders = prepared['borders']
         top_side_results = prepared['top_sides']
         learned_results = prepared['learned']
         feature_results = prepared['features']
+    partial_results = [list(view) for view in partial_results]
+    if strict_corners is not None:
+        partial_results = [[strict, *view[1:]] for strict, view in zip(
+            strict_corners, partial_results)]
     if edge_recovery and 'three_edges' not in prepared:
         recover = recover_three_edges or _recover_paper_from_three_edges
         relaxed_borders = prepared.get('relaxed_borders', {})
@@ -3993,22 +4128,31 @@ def _adaptive_multiview_paper_corners(originals, normalized, image_size,
                     np.ones(2, np.float32), 0.40, corrected)
         if edge_recovery and candidates:
             exact_cache = {id(image): feature_results[view_index]}
-            rescored = []
-            for item in sorted(candidates, key=lambda value: value[2])[:72]:
-                _, _, _, penalty, score_source, raw_quad, evidence_floor = item
+            rescore_items = sorted(
+                candidates, key=lambda value: value[2])[:72]
+            for item in rescore_items:
+                score_source = item[4]
                 key = id(score_source)
                 if key not in exact_cache:
                     exact_cache[key] = _paper_evidence_features(score_source)
+
+            def rescore_candidate(item):
+                _, _, _, penalty, score_source, raw_quad, evidence_floor = item
+                features = exact_cache[id(score_source)]
                 base = cached_evidence(
-                    score_source, raw_quad, exact_cache[key])
+                    score_source, raw_quad, features)
                 evidence = _paper_quad_recovery_evidence(
-                    score_source, raw_quad, features=exact_cache[key],
+                    score_source, raw_quad, features=features,
                     base=base)
                 if evidence_floor is not None:
                     evidence = max(evidence, evidence_floor)
                 if evidence >= 0.5:
-                    rescored.append((item[0], False, penalty - evidence))
-            candidates = rescored
+                    return item[0], False, penalty - evidence
+                return None
+
+            with ThreadPoolExecutor(max_workers=4) as executor:
+                rescored = executor.map(rescore_candidate, rescore_items)
+                candidates = [item for item in rescored if item is not None]
         if not candidates:
             return None
         # 三视图笛卡尔积会直接影响接口耗时；保留代价最低的少量候选。
@@ -4056,10 +4200,12 @@ def _adaptive_multiview_paper_corners(originals, normalized, image_size,
 def _select_adaptive_multiview_paper_corners(
         originals, normalized, image_size, fixed_corners=None,
         strict_corners=None, recover_three_edges=None,
-        learned_corners=None):
+        learned_corners=None, allow_learned_fallback=False, prepared=None):
     """传统与学习候选独立成解，再按同一物理/图像证据仲裁。"""
-    prepared = ({} if learned_corners is None else
-                {'learned': learned_corners})
+    if prepared is None:
+        prepared = {}
+    if learned_corners is not None:
+        prepared.setdefault('learned', learned_corners)
     baseline = _adaptive_multiview_paper_corners(
         originals, normalized, image_size, physical_recovery=False,
         fixed_corners=fixed_corners, prepared=prepared,
@@ -4079,6 +4225,23 @@ def _select_adaptive_multiview_paper_corners(
                physical if baseline is None else baseline
                if physical is None else
                physical if physical[2] < baseline[2] else baseline)
+    # 原始三张纸角都存在但无法形成共同相机，且廉价传统/物理候选也
+    # 失败时，才允许学习候选接管；无需再运行昂贵的全量纸边组合搜索。
+    if (allow_learned_fallback and
+            (classic is None or not np.isfinite(classic[2]) or
+             classic[2] > MAX_MULTIVIEW_REPROJECTION_PX) and
+            learned_corners is not None and
+            all(item is not None for item in learned_corners)):
+        try:
+            learned_calibration = _calibrate_multiview(
+                learned_corners, image_size, allow_per_view=False)
+            learned_error = float(learned_calibration[0])
+            if (np.isfinite(learned_error) and
+                    learned_error <= MAX_MULTIVIEW_REPROJECTION_PX):
+                classic = (learned_corners, learned_calibration,
+                           learned_error)
+        except cv2.error:
+            pass
     if (classic is None or not np.isfinite(classic[2]) or
             classic[2] > MAX_MULTIVIEW_REPROJECTION_PX):
         edge_recovered = _adaptive_multiview_paper_corners(
@@ -4283,6 +4446,7 @@ def diagnose_multiview_images(images):
 
 
 def process_multiview_images(images, image_metadata=None):
+    # 阶段1：输入一致性与拍摄质量门控。失败在进入昂贵几何计算前返回。
     if any(img is None for img in images):
         return None, '无法读取三张照片'
     if any(min(img.shape[:2]) < 480 for img in images):
@@ -4291,6 +4455,12 @@ def process_multiview_images(images, image_metadata=None):
     images = _normalize_multiview_images(images)
     if images is None:
         return None, '三张照片画面比例不同，请使用同一手机、同一拍摄模式'
+    duplicate_pair = _duplicate_multiview_pair(images)
+    if duplicate_pair is not None:
+        labels = ('正上方', '左侧斜拍', '右侧斜拍')
+        first, second = duplicate_pair
+        return None, (f'{labels[first]}与{labels[second]}照片内容重复，'
+                      '请分别上传三个拍摄位置的照片')
     sharpness = [cv2.Laplacian(
         cv2.cvtColor(image, cv2.COLOR_BGR2GRAY), cv2.CV_64F).var()
         for image in images]
@@ -4322,6 +4492,7 @@ def process_multiview_images(images, image_metadata=None):
         item and item.get('jpeg_luma_quantizer') is not None and
         item['jpeg_luma_quantizer'] > 8 for item in image_metadata))
 
+    # 阶段2：恢复三张A4纸姿态，统一建立毫米坐标系和相机参数。
     image_size = (images[0].shape[1], images[0].shape[0])
     focal_hint_px = _multiview_focal_hint(image_metadata, image_size)
     three_edge_cache = {}
@@ -4334,8 +4505,29 @@ def process_multiview_images(images, image_metadata=None):
         return three_edge_cache[key]
 
     learned_pose_corners = [_learned_paper_candidate(image) for image in images]
+    adaptive_prepared = {'learned': learned_pose_corners}
+
+    def learned_solution_selected(selected):
+        return bool(
+            all(item is not None for item in learned_pose_corners) and
+            all(np.mean(np.linalg.norm(
+                np.asarray(actual, np.float32) -
+                np.asarray(learned, np.float32), axis=1)) < 1.0
+                for actual, learned in zip(
+                    selected, learned_pose_corners)))
+
+    def learned_single_side_consensus(selected):
+        if not learned_solution_selected(selected):
+            return None
+        return _single_side_hull_consensus(
+            images, learned_pose_corners, image_size, True,
+            focal_hint_px=focal_hint_px, paper_images=images,
+            learned_corners=learned_pose_corners,
+            relaxed_heel=True)
+
     fast_single_side = None
     learned_geometry_consistent = False
+    learned_calibration = None
     calibrated = None
     if all(item is not None for item in learned_pose_corners):
         try:
@@ -4365,18 +4557,31 @@ def process_multiview_images(images, image_metadata=None):
             pass
     if fast_single_side is not None:
         corners = learned_pose_corners
+        raw_strict_corners = [None, None, None]
     else:
-        detector = (_detect_reliable_paper_corners
-                    if learned_geometry_consistent else
-                    lambda image: detect_partial_paper_corners(image, 30))
         with ThreadPoolExecutor(max_workers=3) as executor:
+            raw_strict_corners = list(executor.map(
+                lambda image: detect_partial_paper_corners(image, 30),
+                images))
             if learned_geometry_consistent:
                 corners = list(executor.map(
-                    lambda image: detector(image, recover_three_edges),
-                    images))
+                    lambda pair: _detect_reliable_paper_corners(
+                        pair[0], recover_three_edges, pair[1]),
+                    zip(images, raw_strict_corners)))
             else:
-                corners = list(executor.map(detector, images))
+                corners = raw_strict_corners
     adaptive_paper_used = fast_single_side is not None
+    strict_geometry_failed = False
+    if all(item is not None for item in raw_strict_corners):
+        try:
+            strict_error = float(_calibrate_multiview(
+                raw_strict_corners, image_size,
+                allow_per_view=False)[0])
+            strict_geometry_failed = bool(
+                not np.isfinite(strict_error) or
+                strict_error > MAX_MULTIVIEW_REPROJECTION_PX)
+        except cv2.error:
+            strict_geometry_failed = True
     if calibrated is None and all(item is not None for item in corners):
         subpixel = _select_subpixel_multiview_corners(
             images, corners, image_size)
@@ -4391,10 +4596,12 @@ def process_multiview_images(images, image_metadata=None):
             fixed_corners=fixed_corners,
             strict_corners=corners,
             recover_three_edges=recover_three_edges,
-            learned_corners=learned_pose_corners)
+            learned_corners=learned_pose_corners,
+            prepared=adaptive_prepared)
         if adaptive is None:
             return None, '有照片无法稳定恢复A4纸边界，请避免强色光并露出至少三条纸边'
         corners, calibrated, _ = adaptive
+        fast_single_side = learned_single_side_consensus(corners)
         if adaptive[2] > MAX_MULTIVIEW_REPROJECTION_PX:
             try:
                 calibrated = _calibrate_multiview(
@@ -4403,15 +4610,22 @@ def process_multiview_images(images, image_metadata=None):
                 calibrated = None
         if (calibrated is None or
                 calibrated[0] > MAX_MULTIVIEW_REPROJECTION_PX):
+            # 第一轮共同几何已严重失配时，第二轮只能在同一批边缘候选中
+            # 重新组合。误差超过上限两倍的样本实测仍无法恢复，继续搜索
+            # 只会让失败请求越过10秒。
+            if adaptive[2] > MAX_MULTIVIEW_REPROJECTION_PX * 2.0:
+                return None, '有照片无法稳定恢复A4纸边界，请避免强色光并露出至少三条纸边'
             adaptive = _select_adaptive_multiview_paper_corners(
                 original_images, images, image_size,
                 strict_corners=corners,
                 recover_three_edges=recover_three_edges,
-                learned_corners=learned_pose_corners)
+                learned_corners=learned_pose_corners,
+                prepared=adaptive_prepared)
             if (adaptive is None or
                     adaptive[2] > MAX_MULTIVIEW_REPROJECTION_PX):
                 return None, '有照片无法稳定恢复A4纸边界，请避免强色光并露出至少三条纸边'
             corners, calibrated, _ = adaptive
+            fast_single_side = learned_single_side_consensus(corners)
         adaptive_paper_used = True
         if calibrated[0] > ACCEPT_MULTIVIEW_REPROJECTION_PX:
             subpixel = _select_subpixel_multiview_corners(
@@ -4427,10 +4641,13 @@ def process_multiview_images(images, image_metadata=None):
             adaptive = _select_adaptive_multiview_paper_corners(
                 original_images, images, image_size,
                 recover_three_edges=recover_three_edges,
-                learned_corners=learned_pose_corners)
+                learned_corners=learned_pose_corners,
+                allow_learned_fallback=strict_geometry_failed,
+                prepared=adaptive_prepared)
             if adaptive is not None and adaptive[2] < calibrated[0] - 0.2:
                 corners, calibrated, _ = adaptive
                 adaptive_paper_used = True
+                fast_single_side = learned_single_side_consensus(corners)
                 if calibrated[0] > ACCEPT_MULTIVIEW_REPROJECTION_PX:
                     subpixel = _select_subpixel_multiview_corners(
                         images, corners, image_size)
@@ -4480,8 +4697,11 @@ def process_multiview_images(images, image_metadata=None):
     # 测量也应走恢复纸边的保守分支，不能假定顶视几何完全可靠。
     top_paper_recovered = bool(recovered_views[0] or adaptive_paper_used)
 
+    # 阶段3：确认左右侧视关系；姿态退化时只采用通过双侧共识的恢复解。
     mirrored_geometry = False
     single_side_consensus_used = False
+    single_side_measurements = None
+    authoritative_single_side = False
     top_fore_angle = math.degrees(math.atan2(
         abs(float(centers[0][1]) - A4_HEIGHT_MM / 2),
         max(abs(float(centers[0][2])), 1.0)))
@@ -4513,7 +4733,9 @@ def process_multiview_images(images, image_metadata=None):
                     learned_corners=learned_pose_corners)
             if single_side is not None:
                 (corners, mirrored_hull, side_angles,
-                 error, top_fore_angle) = single_side
+                 error, top_fore_angle,
+                 single_side_measurements,
+                 authoritative_single_side) = single_side
                 mirrored_geometry = True
                 single_side_consensus_used = True
             elif side_offsets[0] * side_offsets[1] >= 0:
@@ -4538,6 +4760,7 @@ def process_multiview_images(images, image_metadata=None):
     if max(side_angles) < MIN_MULTIVIEW_SIDE_ANGLE_DEG:
         return None, '两张斜拍角度都过小，缺少脚跟三维信息，请增大任意一侧角度'
 
+    # 阶段4：分割三张脚部轮廓，并在A4毫米网格中构建三维视觉外壳。
     if mirrored_geometry:
         masks, footprint, groundprint, lowprint, height_map = mirrored_hull
     else:
@@ -4558,7 +4781,7 @@ def process_multiview_images(images, image_metadata=None):
         footprint, groundprint, height_map, top_planar_mask,
         cameras[1] is not cameras[0], top_paper_recovered,
         top_fore_angle,
-        mirrored_geometry)
+        mirrored_geometry, single_side_consensus_used)
     consensus_used = False
     measurement_disagreement = False
     if (not mirrored_geometry and
@@ -4579,11 +4802,7 @@ def process_multiview_images(images, image_metadata=None):
                 top_fore_angle,
                 mirrored_geometry)
             if refined_measurements is not None:
-                initial_plausible = (
-                    measurements is not None and
-                    180 <= measurements[0] <= 350 and
-                    60 <= measurements[1] <= 130 and
-                    30 <= measurements[2] <= 100)
+                initial_plausible = _measurements_in_range(measurements)
                 differences = (
                     np.abs(np.asarray(measurements[:3]) -
                            np.asarray(refined_measurements[:3]))
@@ -4638,10 +4857,7 @@ def process_multiview_images(images, image_metadata=None):
                 cameras[1] is not cameras[0], top_paper_recovered,
                 top_fore_angle,
                 mirrored_geometry)
-        if (consensus_measurements is None or
-                not 180 <= consensus_measurements[0] <= 350 or
-                not 60 <= consensus_measurements[1] <= 130 or
-                not 30 <= consensus_measurements[2] <= 100):
+        if not _measurements_in_range(consensus_measurements):
             if (segmentation_agreement <
                     HARD_MIN_SEGMENTATION_AGREEMENT):
                 return None, '脚部轮廓受阴影或色偏影响严重，请调整光线后重拍'
@@ -4671,10 +4887,7 @@ def process_multiview_images(images, image_metadata=None):
         soft_measurements, soft_degraded = _degraded_hull_fallback(
             soft_measurements, soft_footprint, soft_groundprint,
             soft_height_map, top_planar_mask, side_angles)
-        if (soft_measurements is not None and
-                180 <= soft_measurements[0] <= 350 and
-                60 <= soft_measurements[1] <= 130 and
-                30 <= soft_measurements[2] <= 100):
+        if _measurements_in_range(soft_measurements):
             footprint, groundprint, lowprint, height_map = (
                 soft_footprint, soft_groundprint,
                 soft_lowprint, soft_height_map)
@@ -4683,14 +4896,34 @@ def process_multiview_images(images, image_metadata=None):
             soft_projection_used = True
     if measurements is None:
         return None, '三张轮廓无法形成稳定足部投影，请保持脚和纸张完全不动'
+    # 阶段5：物理截面先测量，再由所有样本共用的融合模型统一校正。
     pre_selection_measurements = measurements
     measurements = _select_geometry_measurements(
         measurements, footprint, groundprint, height_map,
         top_planar_mask, side_angles, top_fore_angle,
         segmentation_agreement)
-    if single_side_consensus_used:
-        # 单侧共识特征不在融合模型训练分布内。长、前掌宽只取顶视平面，
-        # 脚跟保留两侧重建通过一致性检查后的物理截面。
+    if single_side_consensus_used and authoritative_single_side:
+        # 单侧共识特征不在融合模型训练分布内；保留通过两侧一致性检查、
+        # 且已完成足背视差修正的物理长宽。脚跟使用统一融合模型抑制
+        # 单侧地面交集偏窄；模型缺失时自然退回物理截面。
+        consensus_heel = float(measurements[2])
+        if top_fore_angle >= 15.0:
+            profiles = _measurement_debug_summary(
+                footprint, groundprint, height_map,
+                top_planar_mask, lowprint)
+            low_heel = (profiles.get('low_50') or {}).get('heel')
+            if low_heel is not None and low_heel > consensus_heel:
+                # 大俯仰角下纸面交集容易只留下后跟内侧；以2:1权重
+                # 向50 mm以下的实测轮廓收缩，避免直接采用偏宽上界。
+                consensus_heel = float(
+                    (2.0 * consensus_heel + low_heel) / 3.0)
+        measurements = (
+            float(single_side_measurements[0]),
+            float(single_side_measurements[1]), consensus_heel,
+            float(single_side_measurements[3]))
+    elif single_side_consensus_used:
+        # 已有普通镜像恢复样本保持原测量口径；新共识只处理传统路径无法
+        # 解决的纸角退化，不能改变既有数据的输出分布。
         profiles = _measurement_debug_summary(
             footprint, groundprint, height_map, top_planar_mask, lowprint)
         top_profile = profiles.get('top') or {}
@@ -4738,11 +4971,12 @@ def process_multiview_images(images, image_metadata=None):
                 heel_occlusion_recovered = True
     if heel_stability > HARD_MAX_HEEL_STABILITY_MM:
         return None, '脚跟15%位置的轮廓不稳定，请改善光线并重拍左右斜拍照片'
-    if not (180 <= length <= 350 and 60 <= ball <= 130 and 30 <= heel <= 100):
+    if not _measurements_in_range(measurements):
         return None, '联合测量结果异常，请检查脚跟是否贴齐纸张底边'
     if heel > ball * 0.90:
         return None, '脚踝或小腿遮住脚跟轮廓，请增大左右斜拍角度后重拍'
 
+    # 阶段6：只在尺寸和轮廓均通过物理门控后生成结果图与置信度。
     result_name = f"result_multi_{uuid.uuid4().hex}.png"
     result_path = os.path.join(app.config['UPLOAD_FOLDER'], result_name)
     outline_quality = _draw_multiview_result(
@@ -4764,6 +4998,15 @@ def process_multiview_images(images, image_metadata=None):
     measurement_debug['camera_focal_source'] = (
         'exif' if focal_hint_used else 'paper_geometry')
     measurement_debug['outline'] = outline_quality
+    top_ball = (measurement_debug.get('top') or {}).get('ball')
+    ball_estimates = [float(ball), float(pre_selection_measurements[1])]
+    if top_ball is not None:
+        ball_estimates.append(float(top_ball))
+    ball_estimator_disagreement = (
+        max(ball_estimates) - min(ball_estimates) > 8.0)
+    anthropometric_ratio_risk = not (0.30 <= ball / length <= 0.50)
+    segmentation_confidence_risk = bool(
+        segmentation_check_available and segmentation_agreement < 0.94)
     warnings = []
     if adaptive_paper_used:
         warnings.append('已启用自适应A4纸边恢复')
@@ -4778,7 +5021,7 @@ def process_multiview_images(images, image_metadata=None):
     if soft_projection_used:
         warnings.append('三视图硬交集退化，已使用顶视加单侧轮廓恢复，建议复核或重拍')
     if single_side_consensus_used:
-        warnings.append('左右姿态存在镜像二义性，脚长和脚掌宽采用顶视平面，脚跟采用两份单侧重建共识')
+        warnings.append('左右姿态存在镜像二义性，已采用两份单侧重建共识')
     if min(side_angles) < 15:
         warnings.append('一侧斜拍角度偏小，脚跟宽精度可能下降')
     if min(sharpness) < 6:
@@ -4793,8 +5036,12 @@ def process_multiview_images(images, image_metadata=None):
         warnings.append('脚跟轮廓局部波动较大，脚跟宽置信度降低')
     if not segmentation_check_available:
         warnings.append('轮廓交叉校验不可用，本次沿用主分割结果')
-    elif segmentation_agreement < WARN_SEGMENTATION_AGREEMENT:
+    elif segmentation_confidence_risk:
         warnings.append('多种脚部分割结果存在差异，本次按低置信度输出')
+    if ball_estimator_disagreement:
+        warnings.append('独立脚掌宽估计差异较大，本次按低置信度输出')
+    if anthropometric_ratio_risk:
+        warnings.append('测量比例接近异常范围，本次按低置信度输出')
     if measurement_disagreement:
         warnings.append('不同轮廓算法测量差异较大，本次采用阴影共识结果')
     if low_light_risk:
@@ -4804,7 +5051,7 @@ def process_multiview_images(images, image_metadata=None):
     if overexposure_risk:
         warnings.append('检测到高光过曝，已对脚部轮廓启用曝光归一化')
     if color_cast_risk:
-        warnings.append('照片存在轻微色偏，已按中等置信度输出')
+        warnings.append('照片存在轻微色偏，已降低尺寸置信度')
     if outline_quality['severe']:
         warnings.append('后跟截面与三维投影不一致，已拒绝显示夸张的小腿投影')
     elif outline_quality['rear_cut']:
@@ -4816,12 +5063,15 @@ def process_multiview_images(images, image_metadata=None):
         segmentation_agreement < HARD_MIN_SEGMENTATION_AGREEMENT or
         measurement_disagreement or low_light_risk or compression_risk or
         soft_projection_used or single_side_consensus_used or
-        outline_quality['severe'])
+        outline_quality['severe'] or overexposure_risk or
+        segmentation_confidence_risk or min(side_angles) < 15 or
+        ball_estimator_disagreement or anthropometric_ratio_risk)
     common_medium = bool(
         adaptive_paper_used or error > WARN_MULTIVIEW_REPROJECTION_PX or
         min(sharpness) < 20 or
         segmentation_agreement < WARN_SEGMENTATION_AGREEMENT or
-        degraded_geometry_used or color_cast_risk)
+        degraded_geometry_used or color_cast_risk or
+        min(side_angles) < 15)
     heel_low = bool(
         common_low or min(side_angles) < MIN_MULTIVIEW_SIDE_ANGLE_DEG or
         heel_low_confidence or heel_stability > 4.0 or

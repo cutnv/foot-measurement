@@ -14,6 +14,7 @@ RUN pip install --no-cache-dir -r requirements.txt
 COPY web/ .
 COPY models/paper_candidate_ranker.npz \
      models/paper_lraspp_amodal_v1.onnx \
+     models/paper_lraspp_fallback_v1.onnx \
      models/universal_measurement_v2.npz \
      /models/
 

@@ -2,7 +2,7 @@
 
 基于 Flask、OpenCV 和轻量模型的三视角足部尺寸测量网页。用户将裸足踩在 A4 纸上，上传正上方、左侧斜拍、右侧斜拍三张照片，系统输出脚长、脚掌宽、脚跟宽、置信度和轮廓结果图。
 
-当前版本：[v0.1.0](https://github.com/cutnv/foot-measurement/tree/v0.1.0) · [更新日志](CHANGELOG.md)
+当前版本：[v0.2.0](https://github.com/cutnv/foot-measurement/tree/v0.2.0) · [更新日志](CHANGELOG.md)
 
 > 当前为开发版本。测量精度依赖照片清晰度、光线、A4 纸边可见程度和拍摄角度，暂不能替代专业量脚设备。
 
@@ -65,10 +65,20 @@ python3 -m venv .venv
 4. 三张照片使用同一手机、同一 1× 倍率；拍摄期间脚和 A4 纸保持不动。
 5. 保证脚尖、脚侧和至少三条纸边清晰可见，避免模糊、强阴影、彩色灯光和 0.5× 超广角。
 
+## 测量流程与质量控制
+
+- 三张照片统一使用同一套代码，不按组号、文件名或单张样本设置特殊分支。
+- 传统纸边检测、学习型纸张候选和三视图物理标定共同恢复 A4 毫米坐标系。
+- 通过顶视图和左右侧视图构建足部视觉外壳，再统一计算脚长、脚掌宽和脚跟宽。
+- 自动拦截重复照片、严重模糊、过暗、强烈偏色、纸边不可恢复和侧拍角度不足等输入。
+- 多种轮廓或测量结果差异较大时降低置信度并建议重拍，不强行输出高置信结果。
+
+当前20组已知真值回归集的平均绝对误差：脚长 `3.56 mm`、脚掌宽 `1.57 mm`、脚跟宽 `2.85 mm`，三项总体 `2.66 mm`。该结果仅代表现有小规模开发数据，不代表所有手机、光线和脚型下的最终精度。
+
 ## 项目结构
 
 ```text
-models/                         当前网页使用的三个模型
+models/                         纸张检测、尺寸融合及标注辅助模型
 web/app.py                      Flask 接口和测量算法
 web/templates/index.html        网页界面
 web/static/guide/               拍摄示例图
@@ -89,9 +99,24 @@ db/init/                        数据库最小权限账号初始化
 ```bash
 python -m py_compile web/app.py
 python web/test_paper_recovery.py
+python web/test_multiview_precheck.py
+python web/test_foot_mask_fusion.py
+python web/test_annotation_tool.py
 ```
 
 部分批量回归测试依赖未上传的本地照片数据集，因此无法在全新克隆的仓库中直接运行。
+
+当前1—32组本地回归为29组成功，失败的第9、26、27组属于拍摄视角或照片质量不足；已知真值组的尺寸输出在本次结构精简前后完全一致。当前开发电脑上全量平均耗时约4.1秒，最慢困难样本约10秒，其他硬件负载下可能不同。
+
+## 本地标注工具
+
+开发人员可用本地标注页检查足部掩膜和顶视关键点：
+
+```bash
+python web/annotate_feet.py --source <照片组目录> --manifest <已确认顺序报告.json>
+```
+
+浏览器打开 <http://127.0.0.1:15001/>。工具只监听本机；标注文件默认写入被 Git 忽略的 `datasets/foot_annotations_v1/`，不会上传用户照片。
 
 ## 数据与部署说明
 
@@ -131,7 +156,9 @@ ADMIN_SESSION_SECRET=至少32位随机字符串
 
 - `paper_candidate_ranker.npz`
 - `paper_lraspp_amodal_v1.onnx`
+- `paper_lraspp_fallback_v1.onnx`
 - `universal_measurement_v2.npz`
+- `foot_lraspp_a4_v2.onnx`：仅供本地标注预览失败时兜底，不直接接管生产测量轮廓。
 
 ## 许可
 

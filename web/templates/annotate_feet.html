@@ -1,0 +1,51 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>足部轮廓标注</title>
+<style>
+:root{font-family:"Microsoft YaHei UI",sans-serif;color:#17242d;background:#eef3f4}*{box-sizing:border-box}body{margin:0}.bar{height:64px;padding:10px 18px;background:#fff;border-bottom:1px solid #d5e0e3;display:flex;align-items:center;gap:10px}.bar button,.bar select{height:40px;border:1px solid #b9c8ce;border-radius:7px;background:#fff;padding:0 14px;font-size:15px}.bar button.active{background:#176b87;color:#fff}.bar .save{background:#26735b;color:#fff;margin-left:auto}.info{min-width:250px}.stage{position:relative;margin:14px auto;width:calc(100vw - 28px);height:calc(100vh - 92px);overflow:hidden;background:#20272b}.stage canvas{position:absolute;inset:0;width:100%;height:100%;object-fit:contain}.stage canvas:not(:first-child){touch-action:none}.hint{color:#657680;font-size:13px}.status{font-weight:700}</style>
+</head>
+<body>
+<div class="bar">
+  <button id="prev">上一张</button><button id="next">下一张</button>
+  <span class="info"><b id="title">加载中</b><br><span class="hint" id="progress"></span></span>
+  <select id="role"><option value="">请选择照片姿态</option><option value="top">顶视图</option><option value="side_1">侧视图1</option><option value="side_2">侧视图2</option></select>
+  <button data-mode="foot" class="active">画脚</button><button data-mode="erase">擦除</button>
+  <label>笔刷 <input id="brush" type="range" min="10" max="300" value="80"></label>
+  <button id="undo">撤销</button><button id="reset">恢复初始</button>
+  <select id="pointMode"><option value="">不标/不可见</option></select>
+  <button id="clearPoint">删除当前点</button>
+  <span class="status" id="status"></span><button class="save" id="save">保存并下一张</button>
+</div>
+<div class="stage" id="stage"><canvas id="photo"></canvas><canvas id="mask"></canvas><canvas id="points"></canvas></div>
+<script>
+const token={{ token|tojson }}, labels={{ keypoint_labels|list|tojson }};
+const labelNames={longest_toe:'最长脚趾尖',heel_back:'脚跟最后端',ball_inner:'前掌内侧',ball_outer:'前掌外侧',heel_inner:'脚跟内侧',heel_outer:'脚跟外侧'};
+const photo=document.querySelector('#photo'), mask=document.querySelector('#mask'), pointsCanvas=document.querySelector('#points');
+const pc=photo.getContext('2d'), mc=mask.getContext('2d'), kc=pointsCanvas.getContext('2d');
+let items=[], index=0, mode='foot', drawing=false, points={}, undo=[];
+const pointMode=document.querySelector('#pointMode'); labels.forEach(x=>pointMode.add(new Option(labelNames[x],x)));
+const role=document.querySelector('#role'), roleNames={top:'顶视图',side_1:'侧视图1',side_2:'侧视图2'};
+function pos(e){const r=pointsCanvas.getBoundingClientRect();const scale=Math.min(r.width/photo.width,r.height/photo.height);const ox=(r.width-photo.width*scale)/2,oy=(r.height-photo.height*scale)/2;return[(e.clientX-r.left-ox)/scale,(e.clientY-r.top-oy)/scale]}
+function snapshot(){undo.push({mask:mask.toDataURL(),points:JSON.stringify(points)});if(undo.length>10)undo.shift()}
+function renderPoints(){kc.clearRect(0,0,photo.width,photo.height);kc.font=Math.max(18,photo.width/90)+'px sans-serif';for(const [name,p] of Object.entries(points)){kc.beginPath();kc.arc(p[0],p[1],Math.max(8,photo.width/250),0,Math.PI*2);kc.fillStyle='#00c8ff';kc.fill();kc.strokeStyle='#001820';kc.lineWidth=3;kc.stroke();kc.fillStyle='#001820';kc.fillText(labelNames[name]||name,p[0]+12,p[1]-12)}}
+function loadMask(url){return new Promise((resolve,reject)=>{const im=new Image();im.onload=()=>{mc.clearRect(0,0,mask.width,mask.height);mc.drawImage(im,0,0);const d=mc.getImageData(0,0,mask.width,mask.height);for(let i=0;i<d.data.length;i+=4){const on=d.data[i]>127;d.data[i]=220;d.data[i+1]=50;d.data[i+2]=40;d.data[i+3]=on?115:0}mc.putImageData(d,0,0);resolve()};im.onerror=reject;im.src=url+'&t='+Date.now()})}
+function updateRole(){const top=role.value==='top';pointMode.value='';pointMode.disabled=!top;document.querySelector('#clearPoint').disabled=!top;const suffix=!role.value?'；先选择真实姿态':(top?'；只标清晰可见的关键点':'；侧视图只修轮廓');document.querySelector('#progress').textContent=document.querySelector('#progress').dataset.base+suffix}
+async function load(i,initial=false){index=Math.max(0,Math.min(items.length-1,i));const data=await fetch('/api/items/'+index).then(r=>r.json());photo.width=mask.width=pointsCanvas.width=data.width;photo.height=mask.height=pointsCanvas.height=data.height;const im=new Image();im.onload=()=>pc.drawImage(im,0,0);im.src='/images/'+index+'?t='+Date.now();points=initial?{}:(data.points||{});role.value=data.reviewed?data.role:'';pointMode.value='';undo=[];await loadMask('/masks/'+index+'.png?initial='+(initial?'1':'0'));renderPoints();document.querySelector('#title').textContent=`第${data.group}组 / ${data.name}`;const progress=document.querySelector('#progress');progress.dataset.base=`${index+1}/${items.length}，已确认 ${items.filter(x=>x.reviewed).length}/${items.length}`;updateRole();document.querySelector('#status').textContent=data.reviewed?'已保存':''}
+role.onchange=updateRole;
+function paint(e){const p=pos(e),size=Number(document.querySelector('#brush').value);mc.save();mc.globalCompositeOperation=mode==='erase'?'destination-out':'source-over';mc.fillStyle='rgba(220,50,40,.45)';mc.beginPath();mc.arc(p[0],p[1],size/2,0,Math.PI*2);mc.fill();mc.restore()}
+pointsCanvas.onpointerdown=e=>{if(pointMode.value){snapshot();points[pointMode.value]=pos(e);renderPoints();return}drawing=true;snapshot();pointsCanvas.setPointerCapture(e.pointerId);paint(e)};
+pointsCanvas.onpointermove=e=>{if(drawing)paint(e)};pointsCanvas.onpointerup=()=>drawing=false;
+document.querySelectorAll('[data-mode]').forEach(b=>b.onclick=()=>{mode=b.dataset.mode;document.querySelectorAll('[data-mode]').forEach(x=>x.classList.toggle('active',x===b));pointMode.value=''});
+pointMode.onchange=()=>{if(pointMode.value)document.querySelectorAll('[data-mode]').forEach(x=>x.classList.remove('active'))};
+document.querySelector('#prev').onclick=()=>load(index-1);document.querySelector('#next').onclick=()=>load(index+1);
+document.querySelector('#reset').onclick=()=>{snapshot();points={};load(index,true)};
+document.querySelector('#clearPoint').onclick=()=>{if(pointMode.value&&points[pointMode.value]){snapshot();delete points[pointMode.value];renderPoints()}};
+document.querySelector('#undo').onclick=()=>{const old=undo.pop();if(!old)return;points=JSON.parse(old.points);const im=new Image();im.onload=()=>{mc.clearRect(0,0,mask.width,mask.height);mc.drawImage(im,0,0);renderPoints()};im.src=old.mask};
+document.querySelector('#save').onclick=async()=>{const out=document.createElement('canvas');out.width=mask.width;out.height=mask.height;const oc=out.getContext('2d'),d=mc.getImageData(0,0,mask.width,mask.height),o=oc.createImageData(mask.width,mask.height);for(let i=0;i<d.data.length;i+=4){const v=d.data[i+3]?255:0;o.data[i]=o.data[i+1]=o.data[i+2]=v;o.data[i+3]=255}oc.putImageData(o,0,0);const blob=await new Promise(r=>out.toBlob(r,'image/png'));const body=new FormData();body.append('mask',blob,'mask.png');body.append('points',JSON.stringify(points));body.append('role',role.value);const response=await fetch('/api/items/'+index,{method:'POST',headers:{'X-Annotation-Token':token},body});const data=await response.json();if(!response.ok){document.querySelector('#status').textContent=data.error||'保存失败';return}items[index].reviewed=true;items[index].role=role.value;document.querySelector('#status').textContent='已保存';if(index+1<items.length)load(index+1)};
+fetch('/api/items').then(r=>r.json()).then(data=>{items=data;load(0)});
+</script>
+</body>
+</html>

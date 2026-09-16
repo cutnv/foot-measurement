@@ -87,6 +87,23 @@ def crop_two_percent(images):
     return result
 
 
+def rotate_one_degree(images):
+    result = []
+    for index, image in enumerate(images):
+        h, w = image.shape[:2]
+        matrix = cv2.getRotationMatrix2D(
+            ((w - 1) / 2, (h - 1) / 2), 1.0 if index % 2 else -1.0,
+            1.0)
+        result.append(cv2.warpAffine(
+            image, matrix, (w, h), flags=cv2.INTER_LINEAR,
+            borderMode=cv2.BORDER_REFLECT_101))
+    return result
+
+
+def swap_side_order(images):
+    return [images[0], images[2], images[1]]
+
+
 VARIANTS = {
     'jpeg72': jpeg72,
     'blur': blur,
@@ -97,6 +114,8 @@ VARIANTS = {
     'downscale1280': downscale,
     'vignette': vignette,
     'crop2pct': crop_two_percent,
+    'rotate1deg': rotate_one_degree,
+    'swap_sides': swap_side_order,
 }
 
 
@@ -119,7 +138,17 @@ def main():
     baseline = json.loads(args.baseline_report.read_text(encoding='utf-8'))
     records = []
     draw_result = app._draw_multiview_result
-    app._draw_multiview_result = lambda *unused: None
+
+    def analyze_outline_without_writing(
+            footprint, groundprint, lowprint, height_map,
+            top_planar_mask, measurements, unused_save_path):
+        _, quality = app._anatomical_planar_outline(
+            top_planar_mask, groundprint, lowprint,
+            measurements[0], measurements[2], height_map,
+            return_quality=True)
+        return quality
+
+    app._draw_multiview_result = analyze_outline_without_writing
     try:
         for item in baseline:
             group = int(item['group'])
