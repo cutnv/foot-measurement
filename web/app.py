@@ -885,8 +885,10 @@ def _binary_segmenter_mask(img, model_path, probability):
     net = nets.get(model_path)
     if net is None:
         try:
-            net = cv2.dnn.readNetFromONNX(model_path)
-        except cv2.error:
+            # OpenCV 的 Windows 文件接口可能无法读取中文路径；numpy 先读
+            # 字节，再交给 ONNX 解析器，避免模型存在却静默退回传统阈值。
+            net = cv2.dnn.readNetFromONNX(np.fromfile(model_path, dtype=np.uint8))
+        except (cv2.error, OSError):
             return None
         nets[model_path] = net
     resized = cv2.resize(img, (384, 512), interpolation=cv2.INTER_AREA)
@@ -1792,9 +1794,14 @@ def _paper_quads_agree(first, second, image_shape):
 
 
 def _lock_complete_paper_recovery(img, selected):
-    """仅锁定由四条完整外边纠正过的框；普通候选仍交给三视图选择。"""
+    """完整可见纸边是标定锚点，不能为降低重投影误差而换成局部纸面。"""
     if selected is None:
         return None
+    features = _paper_evidence_features(img)
+    selected_score = _paper_quad_evidence(img, selected, features)
+    _, selected_coverages = _paper_quad_edge_support(img, selected, features)
+    if selected_score >= 0.5 and min(selected_coverages) >= 0.85:
+        return selected
     partial = detect_partial_paper_corners(img, 30)
     if partial is None or _paper_quads_agree(partial, selected, img.shape):
         return None
@@ -4202,6 +4209,12 @@ def _select_adaptive_multiview_paper_corners(
         strict_corners=None, recover_three_edges=None,
         learned_corners=None, allow_learned_fallback=False, prepared=None):
     """传统与学习候选独立成解，再按同一物理/图像证据仲裁。"""
+    fixed_corners = list(fixed_corners) if fixed_corners is not None else [None] * len(normalized)
+    for index, image in enumerate(normalized):
+        if fixed_corners[index] is None:
+            strict = (strict_corners[index] if strict_corners is not None else
+                      detect_partial_paper_corners(image, 30))
+            fixed_corners[index] = _lock_complete_paper_recovery(image, strict)
     if prepared is None:
         prepared = {}
     if learned_corners is not None:
@@ -4328,6 +4341,10 @@ def _select_adaptive_multiview_paper_corners(
             recover_three_edges=recover_three_edges)
         if learned is not None and np.isfinite(learned[2]):
             solutions.append(learned)
+    # 学习候选及融合分支也必须保留已验证的纸框，不能绕过上述锚点。
+    solutions = [solution for solution in solutions if all(
+        fixed is None or _paper_quads_agree(quad, fixed, image.shape)
+        for quad, fixed, image in zip(solution[0], fixed_corners, normalized))]
     if not solutions:
         return None
     return min(solutions, key=solution_score)
@@ -4443,6 +4460,15 @@ def diagnose_multiview_images(images):
         'paper_geometry_accepted': accepted,
         'foot_masks': mask_ok,
     }, None
+
+
+def _segmentation_retake_message(agreements):
+    labels = ('正上方', '左侧斜拍', '右侧斜拍')
+    affected = [labels[i] for i, value in enumerate(agreements)
+                if value < WARN_SEGMENTATION_AGREEMENT]
+    return ('脚部轮廓识别不一致，暂不能可靠测量。优先检查并重拍：' +
+            '、'.join(affected) +
+            '。可能包含纸上阴影或色偏；请避免单侧直射光，让脚边与纸面清楚分开，保持脚和纸不动。')
 
 
 def process_multiview_images(images, image_metadata=None):
@@ -4841,7 +4867,7 @@ def process_multiview_images(images, image_metadata=None):
         # 重算三视图，而不是仅因两种方法不同就拒测。
         if (consensus_used and segmentation_agreement <
                 HARD_MIN_SEGMENTATION_AGREEMENT):
-            return None, '脚部轮廓受阴影或色偏影响较大，请改善光线后重拍'
+            return None, _segmentation_retake_message(segmentation_agreements)
         if consensus_used:
             consensus_measurements = None
         else:
@@ -4860,7 +4886,7 @@ def process_multiview_images(images, image_metadata=None):
         if not _measurements_in_range(consensus_measurements):
             if (segmentation_agreement <
                     HARD_MIN_SEGMENTATION_AGREEMENT):
-                return None, '脚部轮廓受阴影或色偏影响严重，请调整光线后重拍'
+                return None, _segmentation_retake_message(segmentation_agreements)
         else:
             masks = agreement_masks
             top_planar_mask = consensus_top
@@ -5784,6 +5810,17 @@ def admin_measurement_outline(measurement_code):
 @app.route('/uploads/<path:filename>')
 def serve_upload(filename):
     return send_from_directory(app.config['UPLOAD_FOLDER'], filename)
+
+
+@app.route('/api/photo-quality', methods=['POST'])
+def photo_quality():
+    from capture_quality import inspect_photo
+    import sys
+    photo = request.files.get('image')
+    if photo is None or not photo.filename or not allowed_file(photo.filename):
+        return jsonify({'error': '请上传 JPG、PNG 或 WebP 照片'}), 400
+    image, _ = _read_uploaded_image(photo)
+    return jsonify(inspect_photo(image, sys.modules[__name__]))
 
 
 @app.route('/api/measure', methods=['POST'])
