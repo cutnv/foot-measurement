@@ -204,14 +204,20 @@ const btnCopyCode = document.getElementById('btnCopyCode');
 
 let slotData = {}; // key -> { file, previewUrl }
 let saveGeneration = 0;
+let measurementBusy = false;
 
 function showError(msg) { errorMsg.textContent = msg; errorMsg.classList.add('show'); }
 function hideError() { errorMsg.classList.remove('show'); }
 
 function updateSubmitBtn() {
   const footSide = document.querySelector('input[name="footSide"]:checked');
-  btnSubmit.disabled = !footSide || !SLOTS.filter(s => s.required)
-    .every(s => slotData[s.key]?.file);
+  btnSubmit.disabled = measurementBusy || !footSide || !SLOTS.filter(s => s.required)
+    .every(s => slotData[s.key]?.file && ['pass', 'warning'].includes(slotData[s.key]?.quality?.status));
+  const ratios = Object.values(slotData).map(s => s.quality?.ratio).filter(Number.isFinite);
+  if (ratios.length > 1 && Math.max(...ratios) - Math.min(...ratios) > 0.015) {
+    btnSubmit.disabled = true;
+    showError('照片方向或画面比例不一致，请保持三张都竖拍、同一相机模式；只需替换方向或比例不同的照片。');
+  }
 }
 
 function resetSavePanel() {
@@ -249,6 +255,8 @@ function buildSlots() {
       <input type="file" id="camera-${s.key}" accept="image/jpeg,image/png,image/webp" capture="environment">
       <input type="file" id="file-${s.key}" accept="image/jpeg,image/png,image/webp">
       <div class="slot-note">${s.note}</div>
+      <div class="slot-note" id="quality-${s.key}" role="status"></div>
+      <button type="button" id="recheck-${s.key}" style="display:none">重新检查本张</button>
     `;
     container.appendChild(div);
 
@@ -264,9 +272,10 @@ function buildSlots() {
       fileInput.click();
     };
 
-    camBtn.onclick = () => cameraInput.click();
+    camBtn.onclick = () => window.FootCapture.open(s.key, setSlotImage, cameraInput);
     selBtn.onclick = () => fileInput.click();
     rmBtn.onclick = () => removeSlot(s.key);
+    document.getElementById(`recheck-${s.key}`).onclick = () => checkSlotQuality(s.key);
 
     cameraInput.onchange = () => {
       if (cameraInput.files.length > 0) setSlotImage(s.key, cameraInput.files[0]);
@@ -277,7 +286,8 @@ function buildSlots() {
   });
 }
 
-function setSlotImage(key, file) {
+function setSlotImage(key, file, captureInfo = null) {
+  slotData[key]?.qualityController?.abort();
   const duplicate = Object.entries(slotData).find(([otherKey, data]) =>
     otherKey !== key && data.file.name === file.name &&
     data.file.size === file.size && data.file.lastModified === file.lastModified);
@@ -288,7 +298,7 @@ function setSlotImage(key, file) {
     return;
   }
   if (slotData[key]?.previewUrl) URL.revokeObjectURL(slotData[key].previewUrl);
-  slotData[key] = { file, previewUrl: URL.createObjectURL(file) };
+  slotData[key] = { file, previewUrl: URL.createObjectURL(file), captureInfo };
   const preview = document.getElementById(`preview-${key}`);
   const ph = document.getElementById(`ph-${key}`);
   const zone = document.getElementById(`zone-${key}`);
@@ -304,9 +314,55 @@ function setSlotImage(key, file) {
   rmBtn.style.display = 'block';
   hideError();
   updateSubmitBtn();
+  resetSavePanel();
+  resultCard.classList.remove('show');
+  checkSlotQuality(key);
+}
+
+async function checkSlotQuality(key) {
+  const entry = slotData[key];
+  if (!entry) return;
+  entry.qualityController?.abort();
+  const controller = new AbortController();
+  entry.qualityController = controller;
+  entry.quality = {status:'checking'};
+  const status = document.getElementById(`quality-${key}`);
+  const retry = document.getElementById(`recheck-${key}`);
+  status.textContent = '正在检查本张照片…';
+  retry.style.display = 'none';
+  document.getElementById(`badge-${key}`).textContent = '质检中';
+  updateSubmitBtn();
+  const timeout = setTimeout(() => controller.abort(), 45000);
+  try {
+    const fd = new FormData(); fd.append('image', entry.file);
+    const resp = await fetch('/api/photo-quality', {method:'POST', body:fd, signal:controller.signal});
+    if (!resp.ok) throw new Error('HTTP ' + resp.status);
+    const quality = await resp.json();
+    if (slotData[key] !== entry || entry.qualityController !== controller) return;
+    if (!['pass','warning','retake'].includes(quality.status)) throw new Error('无效质检响应');
+    entry.quality = quality;
+    const angleNote = entry.captureInfo ? `拍摄瞬间倾角 ${entry.captureInfo.angle.toFixed(1)}°（仅传感器参考）` : '兼容照片：未经传感器验证角度，需三图联合检查';
+    const label = quality.status === 'retake' ? '必须重拍' : quality.status === 'warning' ? '建议重拍' : '基础检查通过';
+    status.textContent = [label, ...(quality.problems || []), ...(quality.warnings || []), angleNote].join('；');
+    document.getElementById(`badge-${key}`).textContent = label;
+    document.getElementById(`badge-${key}`).className = 'slot-badge quality-' + quality.status;
+  } catch (_) {
+    if (slotData[key] !== entry || entry.qualityController !== controller) return;
+    entry.quality = {status:'error'};
+    status.textContent = '未完成质检，请检查网络后点“重新检查本张”。照片已保留。';
+    document.getElementById(`badge-${key}`).textContent = '尚未质检';
+    document.getElementById(`badge-${key}`).className = 'slot-badge quality-retake';
+    retry.style.display = 'inline-block';
+  } finally {
+    clearTimeout(timeout);
+    if (slotData[key] === entry && entry.qualityController === controller) updateSubmitBtn();
+  }
 }
 
 function removeSlot(key) {
+  slotData[key]?.qualityController?.abort();
+  document.getElementById(`quality-${key}`).textContent = '';
+  document.getElementById(`recheck-${key}`).style.display = 'none';
   if (slotData[key]?.previewUrl) URL.revokeObjectURL(slotData[key].previewUrl);
   delete slotData[key];
   const preview = document.getElementById(`preview-${key}`);
@@ -328,6 +384,9 @@ function removeSlot(key) {
 }
 
 btnSubmit.onclick = async function() {
+  updateSubmitBtn();
+  if (btnSubmit.disabled) return;
+  measurementBusy = true;
   const keys = Object.keys(slotData).filter(k => slotData[k].file);
   if (keys.length === 0) return;
 
@@ -338,12 +397,16 @@ btnSubmit.onclick = async function() {
   resetSavePanel();
 
   const fd = new FormData();
+  const measurementGeneration = saveGeneration;
   keys.forEach(k => fd.append(k, slotData[k].file));
   fd.append('foot_side', document.querySelector(
     'input[name="footSide"]:checked').value);
 
+  let responseReceived = false;
+  const controller = new AbortController();
+  const requestTimeout = setTimeout(() => controller.abort(), 120000);
   try {
-    const resp = await fetch('/api/measure', { method: 'POST', body: fd });
+    const resp = await fetch('/api/measure', { method: 'POST', body: fd, signal: controller.signal });
     const contentType = resp.headers.get('content-type') || '';
     if (!contentType.includes('application/json')) {
       if (resp.status === 413) {
@@ -352,6 +415,8 @@ btnSubmit.onclick = async function() {
       throw new Error(`服务器响应异常（HTTP ${resp.status}）`);
     }
     const data = await resp.json();
+    responseReceived = true;
+    if (measurementGeneration !== saveGeneration) return;
     if (!resp.ok) {
       let msg = data.error || '测量失败';
       if (data.details && data.details.length > 0) {
@@ -409,10 +474,19 @@ btnSubmit.onclick = async function() {
     resultCard.scrollIntoView({ behavior: 'smooth', block: 'start' });
     saveMeasurement(data.save_token, saveGeneration);
   } catch (e) {
-    showError('请求失败: ' + e.message);
+    if (!responseReceived && (e instanceof TypeError || e.name === 'AbortError')) {
+      const localAddress = /^(localhost|127\.|10\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.)/.test(location.hostname);
+      showError((e.name === 'AbortError' ? '等待测量响应超时。' : '连接中断，未收到完整测量结果。') +
+        (localAddress ? '\n当前是电脑上的本地网站：请确认电脑服务正在运行，手机与电脑连接同一 Wi-Fi，未切换到蜂窝网络。' : '\n请检查网络连接和网站服务是否正常。') +
+        '\n照片仍保留在页面中，连接恢复后可再次点击“开始测量”。这条提示不代表光线或照片质量不合格。');
+    } else {
+      showError('测量响应处理失败: ' + e.message);
+    }
   } finally {
+    clearTimeout(requestTimeout);
     loading.classList.remove('show');
-    btnSubmit.disabled = false;
+    measurementBusy = false;
+    updateSubmitBtn();
   }
 };
 
@@ -466,5 +540,7 @@ btnCopyCode.onclick = async function() {
 
 buildSlots();
 </script>
+<link rel="stylesheet" href="{{ url_for('static', filename='capture-guide.css') }}?v=3">
+<script src="{{ url_for('static', filename='capture-guide.js') }}?v=3"></script>
 </body>
 </html>
