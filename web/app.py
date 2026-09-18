@@ -885,8 +885,10 @@ def _binary_segmenter_mask(img, model_path, probability):
     net = nets.get(model_path)
     if net is None:
         try:
-            net = cv2.dnn.readNetFromONNX(model_path)
-        except cv2.error:
+            # OpenCV 的 Windows 文件接口可能无法读取中文路径；numpy 先读
+            # 字节，再交给 ONNX 解析器，避免模型存在却静默退回传统阈值。
+            net = cv2.dnn.readNetFromONNX(np.fromfile(model_path, dtype=np.uint8))
+        except (cv2.error, OSError):
             return None
         nets[model_path] = net
     resized = cv2.resize(img, (384, 512), interpolation=cv2.INTER_AREA)
@@ -1792,9 +1794,14 @@ def _paper_quads_agree(first, second, image_shape):
 
 
 def _lock_complete_paper_recovery(img, selected):
-    """仅锁定由四条完整外边纠正过的框；普通候选仍交给三视图选择。"""
+    """完整可见纸边是标定锚点，不能为降低重投影误差而换成局部纸面。"""
     if selected is None:
         return None
+    features = _paper_evidence_features(img)
+    selected_score = _paper_quad_evidence(img, selected, features)
+    _, selected_coverages = _paper_quad_edge_support(img, selected, features)
+    if selected_score >= 0.5 and min(selected_coverages) >= 0.85:
+        return selected
     partial = detect_partial_paper_corners(img, 30)
     if partial is None or _paper_quads_agree(partial, selected, img.shape):
         return None
@@ -3036,6 +3043,17 @@ def _measurements_in_range(measurements):
             30 <= heel <= 100)
 
 
+def _measurements_disagree(first, second):
+    """判断两套均可用尺寸是否已经超出可安全自动裁决的范围。"""
+    if not (_measurements_in_range(first) and
+            _measurements_in_range(second)):
+        return False
+    differences = np.abs(
+        np.asarray(first[:3], np.float64) -
+        np.asarray(second[:3], np.float64))
+    return bool(max(differences[:2]) > 6.0 or differences[2] > 8.0)
+
+
 def _measure_footprint(footprint, groundprint, height_map, top_planar_mask,
                        calibrated_per_view=False, paper_recovered=False,
                        top_fore_angle=None, mirrored_geometry=False,
@@ -4202,6 +4220,12 @@ def _select_adaptive_multiview_paper_corners(
         strict_corners=None, recover_three_edges=None,
         learned_corners=None, allow_learned_fallback=False, prepared=None):
     """传统与学习候选独立成解，再按同一物理/图像证据仲裁。"""
+    fixed_corners = list(fixed_corners) if fixed_corners is not None else [None] * len(normalized)
+    for index, image in enumerate(normalized):
+        if fixed_corners[index] is None:
+            strict = (strict_corners[index] if strict_corners is not None else
+                      detect_partial_paper_corners(image, 30))
+            fixed_corners[index] = _lock_complete_paper_recovery(image, strict)
     if prepared is None:
         prepared = {}
     if learned_corners is not None:
@@ -4328,6 +4352,10 @@ def _select_adaptive_multiview_paper_corners(
             recover_three_edges=recover_three_edges)
         if learned is not None and np.isfinite(learned[2]):
             solutions.append(learned)
+    # 学习候选及融合分支也必须保留已验证的纸框，不能绕过上述锚点。
+    solutions = [solution for solution in solutions if all(
+        fixed is None or _paper_quads_agree(quad, fixed, image.shape)
+        for quad, fixed, image in zip(solution[0], fixed_corners, normalized))]
     if not solutions:
         return None
     return min(solutions, key=solution_score)
@@ -4443,6 +4471,29 @@ def diagnose_multiview_images(images):
         'paper_geometry_accepted': accepted,
         'foot_masks': mask_ok,
     }, None
+
+
+class _RetakeRequired(str):
+    """携带需重拍照片槽位的错误文本，仍兼容既有字符串调用。"""
+
+    def __new__(cls, message, retake_slots=()):
+        value = super().__new__(cls, message)
+        value.retake_slots = list(retake_slots)
+        return value
+
+
+def _segmentation_retake_message(agreements):
+    labels = ('正上方', '左侧斜拍', '右侧斜拍')
+    slots = ('image_measure', 'image_left', 'image_right')
+    affected = [labels[i] for i, value in enumerate(agreements)
+                if value < WARN_SEGMENTATION_AGREEMENT]
+    retake_slots = [slots[i] for i, value in enumerate(agreements)
+                    if value < WARN_SEGMENTATION_AGREEMENT]
+    return _RetakeRequired(
+        '脚部轮廓识别不一致，暂不能可靠测量。优先检查并重拍：' +
+        '、'.join(affected) +
+        '。可能包含纸上阴影或色偏；请避免单侧直射光，让脚边与纸面清楚分开，保持脚和纸不动。',
+        retake_slots)
 
 
 def process_multiview_images(images, image_metadata=None):
@@ -4784,6 +4835,7 @@ def process_multiview_images(images, image_metadata=None):
         mirrored_geometry, single_side_consensus_used)
     consensus_used = False
     measurement_disagreement = False
+    shadow_candidate_rejected = False
     if (not mirrored_geometry and
             _needs_shadow_consensus(footprint, height_map)):
         refined_masks = [_multiview_foot_mask(img, item, consensus=True)
@@ -4803,20 +4855,22 @@ def process_multiview_images(images, image_metadata=None):
                 mirrored_geometry)
             if refined_measurements is not None:
                 initial_plausible = _measurements_in_range(measurements)
-                differences = (
-                    np.abs(np.asarray(measurements[:3]) -
-                           np.asarray(refined_measurements[:3]))
-                    if initial_plausible else None)
-                measurement_disagreement = bool(
-                    initial_plausible and
-                    (max(differences[:2]) > 6.0 or differences[2] > 8.0))
-                masks = refined_masks
-                top_planar_mask = refined_top
-                footprint, groundprint, lowprint, height_map = (
-                    refined_footprint, refined_groundprint,
-                    refined_lowprint, refined_height_map)
-                measurements = refined_measurements
-                consensus_used = True
+                refined_plausible = _measurements_in_range(
+                    refined_measurements)
+                measurement_disagreement = _measurements_disagree(
+                    measurements, refined_measurements)
+                if initial_plausible and not refined_plausible:
+                    # 强光阴影常令宽松候选大幅外扩。其尺寸已经超出物理
+                    # 范围时，不能让这个坏的复核候选覆盖可信主轮廓。
+                    shadow_candidate_rejected = True
+                elif refined_plausible:
+                    masks = refined_masks
+                    top_planar_mask = refined_top
+                    footprint, groundprint, lowprint, height_map = (
+                        refined_footprint, refined_groundprint,
+                        refined_lowprint, refined_height_map)
+                    measurements = refined_measurements
+                    consensus_used = True
     agreement_masks = masks if consensus_used else [
         _multiview_foot_mask(img, item, consensus=True)
         for img, item in zip(measurement_images, corners)]
@@ -4835,13 +4889,17 @@ def process_multiview_images(images, image_metadata=None):
         segmentation_agreements.append(float(
             np.logical_and(first, second).sum() / max(union, 1)))
     segmentation_agreement = min(segmentation_agreements)
+    if measurement_disagreement and consensus_used:
+        # 两套物理上都说得通的轮廓给出明显不同尺寸时，没有足够证据
+        # 自动选边；按产品规则拒绝显示不可靠尺寸并指明重拍照片。
+        return None, _segmentation_retake_message(segmentation_agreements)
     if (segmentation_check_available and
             segmentation_agreement < WARN_SEGMENTATION_AGREEMENT):
         # 初始肤色阈值可能只取到脚的一部分；共识蒙版完整时，应真正用它
         # 重算三视图，而不是仅因两种方法不同就拒测。
         if (consensus_used and segmentation_agreement <
                 HARD_MIN_SEGMENTATION_AGREEMENT):
-            return None, '脚部轮廓受阴影或色偏影响较大，请改善光线后重拍'
+            return None, _segmentation_retake_message(segmentation_agreements)
         if consensus_used:
             consensus_measurements = None
         else:
@@ -4858,10 +4916,18 @@ def process_multiview_images(images, image_metadata=None):
                 top_fore_angle,
                 mirrored_geometry)
         if not _measurements_in_range(consensus_measurements):
-            if (segmentation_agreement <
-                    HARD_MIN_SEGMENTATION_AGREEMENT):
-                return None, '脚部轮廓受阴影或色偏影响严重，请调整光线后重拍'
+            if not _measurements_in_range(measurements):
+                return None, _segmentation_retake_message(segmentation_agreements)
+            # 宽松复核把投影扩成非物理尺寸时，淘汰复核候选并保留
+            # 已通过三视图几何与尺寸边界的主轮廓。
+            shadow_candidate_rejected = True
         else:
+            if _measurements_disagree(measurements,
+                                      consensus_measurements):
+                # 两套结果都符合基本物理范围却相差过大，程序无法只凭
+                # 当前三张照片知道哪一套是真脚边，因此不展示尺寸。
+                return None, _segmentation_retake_message(
+                    segmentation_agreements)
             masks = agreement_masks
             top_planar_mask = consensus_top
             footprint, groundprint, lowprint, height_map = (
@@ -5006,7 +5072,8 @@ def process_multiview_images(images, image_metadata=None):
         max(ball_estimates) - min(ball_estimates) > 8.0)
     anthropometric_ratio_risk = not (0.30 <= ball / length <= 0.50)
     segmentation_confidence_risk = bool(
-        segmentation_check_available and segmentation_agreement < 0.94)
+        segmentation_check_available and segmentation_agreement < 0.94 and
+        not shadow_candidate_rejected)
     warnings = []
     if adaptive_paper_used:
         warnings.append('已启用自适应A4纸边恢复')
@@ -5016,6 +5083,8 @@ def process_multiview_images(images, image_metadata=None):
         warnings.append('A4标定接近理想上限，结果仍可使用')
     if consensus_used:
         warnings.append('检测到明显阴影，已启用多阈值轮廓共识')
+    if shadow_candidate_rejected:
+        warnings.append('已识别并排除被纸上阴影扩大的轮廓候选')
     if degraded_geometry_used:
         warnings.append('侧视交集退化，脚长和脚掌宽已回退至顶视平面测量')
     if soft_projection_used:
@@ -5043,7 +5112,7 @@ def process_multiview_images(images, image_metadata=None):
     if anthropometric_ratio_risk:
         warnings.append('测量比例接近异常范围，本次按低置信度输出')
     if measurement_disagreement:
-        warnings.append('不同轮廓算法测量差异较大，本次采用阴影共识结果')
+        warnings.append('不同轮廓算法测量差异较大，本次按低置信度输出')
     if low_light_risk:
         warnings.append('部分照片曝光偏低，尺寸仅作参考，建议增加普通白光后重拍')
     if compression_risk:
@@ -5060,14 +5129,17 @@ def process_multiview_images(images, image_metadata=None):
     common_low = bool(
         error > ACCEPT_MULTIVIEW_REPROJECTION_PX or min(sharpness) < 6 or
         not segmentation_check_available or
-        segmentation_agreement < HARD_MIN_SEGMENTATION_AGREEMENT or
-        measurement_disagreement or low_light_risk or compression_risk or
+        (segmentation_agreement < HARD_MIN_SEGMENTATION_AGREEMENT and
+         not shadow_candidate_rejected) or
+        measurement_disagreement or
+        low_light_risk or compression_risk or
         soft_projection_used or single_side_consensus_used or
         outline_quality['severe'] or overexposure_risk or
         segmentation_confidence_risk or min(side_angles) < 15 or
         ball_estimator_disagreement or anthropometric_ratio_risk)
     common_medium = bool(
-        adaptive_paper_used or error > WARN_MULTIVIEW_REPROJECTION_PX or
+        adaptive_paper_used or shadow_candidate_rejected or
+        error > WARN_MULTIVIEW_REPROJECTION_PX or
         min(sharpness) < 20 or
         segmentation_agreement < WARN_SEGMENTATION_AGREEMENT or
         degraded_geometry_used or color_cast_risk or
@@ -5786,6 +5858,17 @@ def serve_upload(filename):
     return send_from_directory(app.config['UPLOAD_FOLDER'], filename)
 
 
+@app.route('/api/photo-quality', methods=['POST'])
+def photo_quality():
+    from capture_quality import inspect_photo
+    import sys
+    photo = request.files.get('image')
+    if photo is None or not photo.filename or not allowed_file(photo.filename):
+        return jsonify({'error': '请上传 JPG、PNG 或 WebP 照片'}), 400
+    image, _ = _read_uploaded_image(photo)
+    return jsonify(inspect_photo(image, sys.modules[__name__]))
+
+
 @app.route('/api/measure', methods=['POST'])
 def measure():
     _cleanup_expired_results()
@@ -5811,8 +5894,12 @@ def measure():
         metadata = [item[1] for item in uploaded]
         result, error = process_multiview_images(images, metadata)
         if error:
-            return jsonify({'error': '联合测量失败',
-                            'details': [error]}), 400
+            payload = {'error': '联合测量失败',
+                       'details': [str(error)]}
+            retake_slots = getattr(error, 'retake_slots', None)
+            if retake_slots:
+                payload['retake_slots'] = retake_slots
+            return jsonify(payload), 400
         save_token = _issue_save_token(result, foot_side)
         return jsonify({
             'average': {
